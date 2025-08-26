@@ -1,8 +1,9 @@
 # `pdf-squeeze` — high-quality PDF compression for macOS (zsh, Apple Silicon)
 
-World’s-best-without-OCR PDF compressor for the command line.  
+PDF compressor for the command line.  
 Auto-tunes per file by analysing embedded images; preserves vector text and layout.  
 Written for Apple Silicon; no Rosetta.
+Designed to replace PDFSqueezer.app which is an excellent tool but still relies on Rosetta.
 
 - zsh-native (no bashisms)
 - Presets: **light**, **standard** (default), **extreme**, **lossless**, **archive**
@@ -276,12 +277,6 @@ Just remove or replace the single script:
 rm -f ~/bin/pdf-squeeze
 # …or overwrite with the new version and chmod +x
 ```
-
----
-
-## License
-
-You own your script; this README is provided to document its operation and usage.
 
 ---
 
