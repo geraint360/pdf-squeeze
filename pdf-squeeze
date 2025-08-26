@@ -1,0 +1,710 @@
+#!/bin/zsh
+set -e
+set -o pipefail
+# (intentionally NOT using -u / nounset in zsh; too aggressive with locals/positionals)
+
+# pdf-squeeze v2.2.0-zsh — World's-best-without-OCR PDF compressor (Apple Silicon)
+# - zsh-native (no bashisms)
+# - Auto-tuned "standard" via image PPI analysis; preserves vectors/text
+# - Presets: light / standard / extreme / lossless / archive
+# - Batch + recurse + parallel; in-place atomic replacement
+# - Metadata & timestamps preserved by default; deterministic IDs
+# - Heuristic skip when no images; include/exclude regex; size-floor skip
+# - Password handling (no cache): qpdf decrypt or skip
+# - Sidecar SHA-256, post-hook, CSV logging
+# - --debug: print planned actions/parameters and estimated savings; no writes
+#
+# Dependencies (Homebrew):
+#   brew install ghostscript pdfcpu qpdf mupdf exiftool poppler parallel coreutils
+#
+# Notes:
+# - `parallel` is optional (script falls back to serial if absent).
+# - `coreutils` provides reliable `gstat` and `sha256sum` on macOS.
+
+# - --check-deps: verify required/optional tools are installed
+version="2.2.0-zsh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  pdf-squeeze [OPTIONS] INPUT...
+
+Presets:
+  -p standard   (default) Auto-tuned; per-PDF targets; no OCR.
+  -p light      C/G 300dpi; mono 1200dpi; JPEG Q~78.
+  -p extreme    C/G 144dpi; mono 600dpi; JPEG Q~68.
+  -p lossless   Structure-only; no downsampling.
+  -p archive    C/G 240dpi; mono 900dpi; deterministic; strip metadata.
+
+Key Options:
+  --recurse                 Recurse for *.pdf
+  --jobs N                  Parallel workers (GNU parallel)
+  --inplace                 Replace originals atomically
+  -o OUT                    Single output path (single input)
+  -q N                      Force JPEG quality 1..100
+  --min-gain PCT            Skip replace if saving < PCT (default 1)
+  --skip-if-smaller SIZE    Skip files below SIZE (e.g. 200K, 1.5MB)
+  --dry-run                 Analyse only; show preset + estimated savings & size
+  --debug                   Show computed parameters + estimated savings; no writes
+  --check-deps              Verify required/optional tools; exit after check
+
+Metadata/Timestamps:
+  --keep-metadata (default) | --strip-metadata
+  --keep-date (default)     | --no-keep-date
+
+Security:
+  --password TEXT | --password-file FILE
+
+Determinism/Logs:
+  --deterministic (default) | --no-deterministic
+  --log CSV
+
+Filtering (regex on full path):
+  --exclude REGEX (repeatable)
+  --include REGEX (repeatable)
+
+Sidecars & Hooks:
+  --sidecar-sha256
+  --post-hook 'CMD {}'       (env: IN, OUT, ORIG_BYTES, OUT_BYTES, PRESET, SAVEPCT)
+EOF
+  exit 2
+}
+
+typeset -a ARGS FILES EXCLUDES INCLUDES
+PRESET="standard"; OUT_SINGLE=""; JPEGQ_OVERRIDE=""
+RECURSE=false; JOBS=1; INPLACE=false; DRYRUN=false; DEBUG=false
+LOGFILE=""; MIN_GAIN=1; SKIP_UNDER_BYTES=""
+KEEP_METADATA=true; KEEP_DATE=true; DETERMINISTIC=true
+PASSWORD=""; PASSWORD_FILE=""; POST_HOOK=""; SIDECAR=false
+QUIET=${QUIET:-false}; INTERNAL_ONE=false
+CHECK_DEPS=false
+
+log() { $QUIET || printf '%s\n' "$*"; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p) PRESET="${2:-}"; shift 2 ;;
+    -o) OUT_SINGLE="${2:-}"; shift 2 ;;
+    -q) JPEGQ_OVERRIDE="${2:-}"; shift 2 ;;
+    --recurse) RECURSE=true; shift ;;
+    --jobs) JOBS="${2:-1}"; shift 2 ;;
+    --inplace) INPLACE=true; shift ;;
+    --dry-run) DRYRUN=true; shift ;;
+    --debug) DEBUG=true; shift ;;
+    --log) LOGFILE="${2:-}"; shift 2 ;;
+    --min-gain) MIN_GAIN="${2:-1}"; shift 2 ;;
+    --skip-if-smaller) SKIP_UNDER_BYTES="${2:-}"; shift 2 ;;
+    --keep-metadata) KEEP_METADATA=true; shift ;;
+    --strip-metadata) KEEP_METADATA=false; shift ;;
+    --keep-date) KEEP_DATE=true; shift ;;
+    --no-keep-date) KEEP_DATE=false; shift ;;
+    --deterministic) DETERMINISTIC=true; shift ;;
+    --no-deterministic) DETERMINISTIC=false; shift ;;
+    --password) PASSWORD="${2:-}"; shift 2 ;;
+    --password-file) PASSWORD_FILE="${2:-}"; shift 2 ;;
+    --post-hook) POST_HOOK="${2:-}"; shift 2 ;;
+    --sidecar-sha256) SIDECAR=true; shift ;;
+    --quiet) QUIET=true; shift ;;
+    --exclude) EXCLUDES+=("${2:-}"); shift 2 ;;
+    --include) INCLUDES+=("${2:-}"); shift 2 ;;
+    --internal-one) INTERNAL_ONE=true; shift ;;
+    --check-deps) CHECK_DEPS=true; shift ;;
+    --help|-h) usage ;;
+    --version) echo "$version"; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; usage ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+
+# $DEBUG && set -x
+
+# Allow --check-deps to run without inputs
+[[ ${#ARGS[@]} -ge 1 || $INTERNAL_ONE = true || $CHECK_DEPS = true ]] || usage
+if [[ -n "$OUT_SINGLE" && ${#ARGS[@]} -ne 1 && $INTERNAL_ONE = false ]]; then
+  echo "-o is only valid with a single input file." >&2; exit 2
+fi
+if [[ -n "$PASSWORD_FILE" && -z "$PASSWORD" ]]; then
+  PASSWORD="$(/usr/bin/head -n1 "$PASSWORD_FILE" 2>/dev/null || true)"
+fi
+
+check_deps() {
+  # Required binaries mapped to Homebrew formulae
+  local -a REQ_CMDS REQ_DESC OPT_CMDS OPT_DESC
+  REQ_CMDS=(gs pdfcpu qpdf mutool exiftool pdfinfo pdfimages sha256sum gstat)
+  REQ_DESC=('ghostscript' 'pdfcpu' 'qpdf' 'mupdf' 'exiftool' 'poppler' 'poppler' 'coreutils' 'coreutils')
+
+  # Optional
+  OPT_CMDS=(parallel)
+  OPT_DESC=('parallel')
+
+  local missing=0
+
+  printf "%-12s  %-10s  %s\n" "COMMAND" "STATUS" "HOMEBREW PACKAGE"
+  printf "%-12s  %-10s  %s\n" "--------" "------" "------------------"
+
+  local i=1
+  for cmd in "${REQ_CMDS[@]}"; do
+    local pkg="${REQ_DESC[$i]}"; ((i++))
+    if command -v "$cmd" >/dev/null 2>&1; then
+      printf "%-12s  %-10s  %s\n" "$cmd" "OK" "$pkg"
+    else
+      printf "%-12s  %-10s  %s\n" "$cmd" "MISSING" "$pkg"
+      missing=1
+    fi
+  done
+
+  # Optional tools
+	local j=1
+	while (( j <= ${#OPT_CMDS[@]} )); do
+		local ocmd="${OPT_CMDS[$j]}"
+		local opkg="${OPT_DESC[$j]}"
+		if command -v "$ocmd" >/dev/null 2>&1; then
+			printf "%-12s  %-10s  %s (optional)\n" "$ocmd" "OK" "$opkg"
+		else
+			printf "%-12s  %-10s  %s (optional)\n" "$ocmd" "MISSING" "$opkg"
+		fi
+		((j++))
+	done
+
+  echo
+  echo "Install (or fix) with:"
+  echo "  brew install ghostscript pdfcpu qpdf mupdf exiftool poppler coreutils parallel"
+
+  return $missing
+}
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 127; }; }
+if $CHECK_DEPS; then
+  check_deps; exit $?
+fi
+
+for t in pdfcpu qpdf mutool exiftool pdfinfo pdfimages gs sha256sum; do need "$t"; done
+PARALLEL_OK=false; command -v parallel >/dev/null 2>&1 && PARALLEL_OK=true
+
+is_pdf() { [[ "${1:l}" == *.pdf ]]; }
+gather_one() {
+  local in="$1"
+  if [[ -d "$in" ]]; then
+    if $RECURSE; then
+      command find "$in" -type f \( -iname '*.pdf' -o -iname '*.PDF' \)
+    else
+      for f in "$in"/*; do [[ -f "$f" && "${f:l}" == *.pdf ]] && print -r -- "$f"; done
+    fi
+  elif [[ -f "$in" ]]; then
+    print -r -- "$in"
+  fi
+}
+
+if $INTERNAL_ONE; then FILES=("$1")
+else
+  FILES=()
+  for x in "${ARGS[@]}"; do
+    while IFS= read -r line; do
+      FILES+=("$line")
+    done < <(gather_one "$x")
+  done
+fi
+[[ ${#FILES[@]} -ge 1 ]] || { echo "No PDFs found."; exit 1; }
+
+if $DEBUG; then
+  printf 'DEBUG: FILES(%d):\n' "${#FILES[@]}"
+  for p in "${FILES[@]}"; do printf '  %s\n' "$p"; done
+fi
+
+filter_files() {
+  local -a input; input=("$@"); local -a keep
+  for f in "${input[@]}"; do
+    [[ "${f:l}" == *.pdf ]] || continue
+    local skip=false
+    for pat in "${EXCLUDES[@]}"; do print -r -- "$f" | command grep -E -q -- "$pat" && { skip=true; break; }; done
+    $skip && continue
+    if (( ${#INCLUDES[@]} > 0 )); then
+      local matched=false
+      for pat in "${INCLUDES[@]}"; do print -r -- "$f" | command grep -E -q -- "$pat" && { matched=true; break; }; done
+      $matched || continue
+    fi
+    keep+=("$f")
+  done
+  print -r -- "${keep[@]}" 2>/dev/null || true
+}
+if ! $INTERNAL_ONE; then
+  FILES=("${(@f)$(filter_files "${FILES[@]}")}")
+  [[ ${#FILES[@]} -ge 1 ]] || { echo "No PDFs after filtering."; exit 1; }
+fi
+
+size_of() { { command gstat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null; } }
+restore_times() { touch -r "$1" "$2" 2>/dev/null || true; }
+
+parse_bytes() {
+  local s="${1:-}"; [[ -z "$s" ]] && { echo ""; return; }
+  s="${s//[[:space:]]/}"; s="${s:u}"
+  [[ "$s" =~ '^[0-9]+$' ]] && { echo "$s"; return; }
+  if print -r -- "$s" | command grep -E -q '^[0-9]+(\.[0-9]+)?(K|KB|M|MB|G|GB)$'; then
+    local n="${s%[KkMmGg][Bb]}" u="${s##*[0-9]}"
+    case "$u" in
+      K|KB) awk -v n="$n" 'BEGIN{printf "%.0f", n*1024}' ;;
+      M|MB) awk -v n="$n" 'BEGIN{printf "%.0f", n*1024*1024}' ;;
+      G|GB) awk -v n="$n" 'BEGIN{printf "%.0f", n*1024*1024*1024}' ;;
+    esac; return
+  fi
+  echo "Invalid SIZE: $1" >&2; exit 2
+}
+
+fmt_bytes() {
+  # Usage: fmt_bytes 1234567  -> "1.18 MB"
+  local b="$1"
+  awk -v b="$b" 'BEGIN{
+    if (b<1024){printf "%d B", b; exit}
+    kb=b/1024; if (kb<1024){printf "%.1f KB", kb; exit}
+    mb=kb/1024; if (mb<1024){printf "%.1f MB", mb; exit}
+    gb=mb/1024; printf "%.2f GB", gb
+  }'
+}
+
+analyse_pdf() {
+  local f="$1"
+  local list
+  if ! list="$(pdfimages -list "$f" 2>/dev/null)"; then
+    echo "0 0 0 0 0 0 0 0 0"; return
+  fi
+
+  # Portable BSD/POSIX awk: functions at top-level (not inside END/BEGIN).
+  local parsed
+  parsed=$(print -r -- "$list" | awk '
+    function isgray(s,    t){ t=tolower(s); return (t=="gray" || t=="greyscale" || t=="grey") }
+    function med(a, n,    i,j,tmp){
+      if (n==0) return 0
+      for (i=1;i<=n;i++) for (j=i+1;j<=n;j++) if (a[j] < a[i]) { tmp=a[i]; a[i]=a[j]; a[j]=tmp }
+      return (n%2)? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2
+    }
+    function minv(a, n,   i,m){
+      if (n==0) return 0
+      m=a[1]; for (i=2;i<=n;i++) if (a[i]<m) m=a[i]; return m
+    }
+
+    BEGIN {
+      headerSeen=sepSeen=0
+      xcol=ycol=colorcol=bpccol=0
+      cN=gN=mN=0
+    }
+
+    /^page[[:space:]]+num[[:space:]]+type/ {
+      headerSeen=1
+      for (i=1; i<=NF; i++) {
+        if ($i=="x-ppi") xcol=i
+        else if ($i=="y-ppi") ycol=i
+        else if ($i=="color") colorcol=i
+        else if ($i=="bpc")   bpccol=i
+      }
+      next
+    }
+
+    /^-+/ { if (headerSeen) { sepSeen=1; next } }
+
+    {
+      if (!sepSeen || xcol==0 || ycol==0 || colorcol==0 || bpccol==0) next
+      x=$xcol; y=$ycol; col=$colorcol; bpc=$bpccol
+      if ((x+0)==0 && (y+0)==0) next
+
+      ppi=(x+y)/2
+      if (isgray(col)) {
+        g[++gN]=ppi
+      } else if (tolower(col)=="icc" || tolower(col)=="rgb" || tolower(col)=="cmyk") {
+        c[++cN]=ppi
+      } else if ((bpc+0)==1) {
+        # Bilevel fallback
+        m[++mN]=ppi
+      }
+    }
+
+    END {
+      C_CNT=cN+0; G_CNT=gN+0; M_CNT=mN+0
+      C_MED=med(c, C_CNT); G_MED=med(g, G_CNT); M_MED=med(m, M_CNT)
+      C_MIN=minv(c, C_CNT); G_MIN=minv(g, G_CNT); M_MIN=minv(m, M_CNT)
+      printf "%d %d %d %.0f %.0f %.0f %.0f %.0f %.0f\n",
+             C_CNT, G_CNT, M_CNT, C_MED, G_MED, M_MED, C_MIN, G_MIN, M_MIN
+    }')
+
+  [[ -n "$parsed" ]] && echo "$parsed" || echo "0 0 0 0 0 0 0 0 0"
+}
+
+sha_sidecar() {
+  local which="$1" file="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" > "${file}.${which}.sha256" 2>/dev/null || true
+  else
+    shasum -a 256 "$file" > "${file}.${which}.sha256" 2>/dev/null || true
+  fi
+}
+
+gs_pass() {
+  local in="$1" out="$2" jpegq="$3" deterministic="$4" C_RES="$5" G_RES="$6" M_RES="$7"
+  local -a GS_COMMON
+  GS_COMMON=(
+    -sDEVICE=pdfwrite -dCompatibilityLevel=1.6
+    -dDetectDuplicateImages=true
+    -dCompressFonts=true -dSubsetFonts=true -dEmbedAllFonts=true
+    -dAutoRotatePages=/None
+    -dColorConversionStrategy=/LeaveColorUnchanged
+    -dAutoFilterColorImages=true -dAutoFilterGrayImages=true
+    -dDownsampleColorImages=true -dDownsampleGrayImages=true -dDownsampleMonoImages=true
+    -dColorImageDownsampleType=/Bicubic -dGrayImageDownsampleType=/Bicubic -dMonoImageDownsampleType=/Subsample
+    -dEncodeColorImages=true -dEncodeGrayImages=true -dEncodeMonoImages=true
+    -sColorImageFilter=/DCTEncode -sGrayImageFilter=/DCTEncode
+    -sMonoImageFilter=/JBIG2Encode -dJBIG2Lossless=true
+    -dNOPAUSE -dBATCH
+  )
+  [[ -n "$jpegq" ]] && GS_COMMON+=(-dJPEGQ="$jpegq")
+  $deterministic && GS_COMMON+=(-dDeterministicIDs=true)
+  gs "${GS_COMMON[@]}" \
+     -dColorImageResolution="$C_RES" \
+     -dGrayImageResolution="$G_RES" \
+     -dMonoImageResolution="$M_RES" \
+     -sOutputFile="$out" "$in" >/dev/null 2>&1
+}
+
+# --- estimator: returns "LOW HIGH" (%), heuristic but useful
+estimate_savings() {
+  local preset="$1" no_images="$2" c_cnt="$3" g_cnt="$4" m_cnt="$5" \
+        c_med="$6" g_med="$7" m_med="$8" c_res="$9" g_res="${10}" m_res="${11}" jpegq="${12}"
+
+  # Base structural win (after pdfcpu/qpdf/mutool), typical 1–6%
+  local base_low=1 base_high=6
+  if [[ "$preset" == "lossless" || "$no_images" == "true" ]]; then
+    echo "$base_low $base_high"; return
+  fi
+
+  # Downsampling factors ~ (target/median)^2, clipped to [0,1]
+  f() { awk -v t="$1" -v m="$2" 'BEGIN{if(m<=0||t>=m){print 0}else{r=t/m; if(r<0)r=0; s=r*r; print (1-s)*100}}'; }
+  local c_gain=0 g_gain=0 mono_gain=0
+  (( c_cnt > 0 )) && c_gain=$(f "$c_res" "$c_med")
+  (( g_cnt > 0 )) && g_gain=$(f "$g_res" "$g_med")
+  # Mono: JBIG2 lossless typically 25–55% on bilevel scans depending on content
+  if (( m_cnt > 0 )); then
+    if (( m_med > 0 && m_res > 0 && m_res < m_med )); then
+      mono_gain=$(f "$m_res" "$m_med")
+      # Add JBIG2 lossless intrinsic compression benefit (conservative 15–30%)
+      mono_gain=$(awk -v g="$mono_gain" 'BEGIN{print g+20}')
+    else
+      mono_gain=20
+    fi
+    # Clip mono estimate
+    mono_gain=$(awk -v g="$mono_gain" 'BEGIN{if(g<10)g=10; if(g>60)g=60; print g}')
+  fi
+
+  # Weighting by image class counts (proxy)
+  local total=$(( c_cnt + g_cnt + m_cnt )); (( total==0 )) && { echo "$base_low $base_high"; return; }
+  local wC=$(awk -v n="$c_cnt" -v t="$total" 'BEGIN{print (t>0)?n/t:0}')
+  local wG=$(awk -v n="$g_cnt" -v t="$total" 'BEGIN{print (t>0)?n/t:0}')
+  local wM=$(awk -v n="$m_cnt" -v t="$total" 'BEGIN{print (t>0)?n/t:0}')
+  local img_gain=$(awk -v c="$c_gain" -v g="$g_gain" -v m="$mono_gain" -v wC="$wC" -v wG="$wG" -v wM="$wM" \
+                   'BEGIN{print c*wC + g*wG + m*wM}')
+
+  # JPEG quality adjustment: Q68 vs Q74 ~ additional 5–10% on photographic images
+  local q_bonus=0
+  if (( jpegq <= 68 )); then
+    q_bonus=8
+  elif (( jpegq <= 72 )); then
+    q_bonus=4
+  else
+    q_bonus=2
+  fi
+
+  # Combine, clamp, and produce a range ±30% relative
+  local mid=$(awk -v bL="$base_low" -v bH="$base_high" -v i="$img_gain" -v qb="$q_bonus" \
+              'BEGIN{print ( (bL+bH)/2 + i + qb )}')
+  # Reasonable bounds
+  mid=$(awk -v m="$mid" 'BEGIN{if(m<3)m=3; if(m>80)m=80; print m}')
+  local low=$(awk -v m="$mid" 'BEGIN{print (m*0.7)}')
+  local high=$(awk -v m="$mid" 'BEGIN{print (m*1.3>90?90:m*1.3)}')
+  printf '%.1f %.1f\n' "$low" "$high"
+}
+
+SKIP_UNDER_RESOLVED=""; [[ -n "$SKIP_UNDER_BYTES" ]] && SKIP_UNDER_RESOLVED="$(parse_bytes "$SKIP_UNDER_BYTES")"
+
+process_one() {
+  emulate -L zsh
+  unsetopt nounset
+
+  # Show exactly what argv we received
+  if $DEBUG; then
+    printf 'DEBUG: process_one argv:'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'
+  fi
+
+  # pull args with safe defaults
+  local IN="${1-}" OUT_REQ="${2-}" PRE="${3-}" JQ="${4-}" INP="${5-}" \
+        KEEP_META="${6-}" KEEP_DT="${7-}" MINGAIN="${8-}" DETER="${9-}" \
+        PASS="${10-}" HOOK="${11-}" SC="${12-}"
+
+  # hard guard: if IN somehow wasn't provided, bail clearly
+  if [[ -z "$IN" ]]; then
+    print -u2 "INTERNAL ERROR: process_one called without input path (PRE=$PRE DEBUG=$DEBUG)"
+    return 2
+  fi
+
+  local orig="$IN"
+  local base="${IN%.*}"
+  local OUT="${OUT_REQ:-${base}_squeezed.pdf}"
+
+  # early breadcrumb (guaranteed to print before touching $IN)
+  if $DEBUG; then printf 'DEBUG: process_one: IN="%s" OUT="%s" PRE=%s JQ=%s INP=%s\n' "$IN" "$OUT" "$PRE" "$JQ" "$INP"; fi
+  
+  # Encryption
+  local encrypted="no"
+	if [[ -n "$PASS" ]]; then
+		local dec="$(dirname "$IN")/.tmp.$(basename "$IN").dec.$$"
+		if qpdf --password="$PASS" --decrypt "$IN" "$dec" >/dev/null 2>&1; then
+			IN="$dec"
+		else
+			if $DEBUG; then
+				printf 'DEBUG: SKIP bad password: %s\n' "$orig"
+			else
+				printf 'SKIP (bad password): %s\n' "$orig"
+			fi
+			return 0
+		fi
+	else
+		if pdfinfo "$IN" 2>/dev/null | command grep -E -qi '^Encrypted:\s*yes'; then
+			encrypted="yes"
+			if $DEBUG; then
+				printf 'DEBUG: SKIP encrypted (no password): %s\n' "$IN"
+			else
+				printf 'SKIP (encrypted): %s\n' "$IN"
+			fi
+			return 0
+		fi
+	fi
+
+  local atime mtime
+  if $KEEP_DT; then
+    atime=$(command gstat -c %X "$orig" 2>/dev/null || stat -f %a "$orig" 2>/dev/null || true)
+    mtime=$(command gstat -c %Y "$orig" 2>/dev/null || stat -f %m "$orig" 2>/dev/null || true)
+  fi
+
+    # hard guard before using IN (helps diagnose empty/invalid arg)
+  if [[ ! -r "$IN" ]]; then
+    if $DEBUG; then
+      printf 'DEBUG: unreadable input early: IN="%s" orig="%s"\n' "$IN" "$orig"
+    else
+      printf 'SKIP (unreadable input): IN="%s" orig="%s"\n' "$IN" "$orig"
+    fi
+    return 2
+  fi
+
+  local dir="$(dirname "$IN")"
+  local tmp1="$dir/.tmp.$(basename "$IN").opt.$$"
+  local tmp2="$dir/.tmp.$(basename "$IN").gs.$$"
+  local tmp3="$dir/.tmp.$(basename "$IN").fin.$$"
+  if $DEBUG; then printf "DEBUG: input=%s tmp1=%s\n" "$orig" "$tmp1"; fi
+  setopt localtraps
+	trap 'rm -f "$tmp1" "$tmp2" "$tmp3" 2>/dev/null || true' EXIT
+
+  local ORIG_BYTES=$(size_of "$orig")
+
+  # 0) Structural optimise (normalises before analysis; fast)
+  if ! pdfcpu optimize -quiet "$IN" "$tmp1" >/dev/null 2>&1; then
+    if [[ -r "$IN" ]]; then
+      cp "$IN" "$tmp1"
+    else
+      if $DEBUG; then
+        printf 'DEBUG: pdfcpu failed and input unreadable: IN="%s" orig="%s"\n' "$IN" "$orig"
+      else
+        printf 'SKIP (optimize failed, unreadable): IN="%s" orig="%s"\n' "$IN" "$orig"
+      fi
+      return 2
+    fi
+  fi
+
+  # Analyse images
+  read -r C_CNT G_CNT M_CNT C_MED G_MED M_MED C_MIN G_MIN M_MIN <<<"$(analyse_pdf "$tmp1")"
+  local NO_IMAGES=false; (( C_CNT + G_CNT + M_CNT == 0 )) && NO_IMAGES=true
+
+  # Targets & JPEGQ
+  local C_RES=200 G_RES=200 M_RES=900 JPEGQ=74 PRE_EFF="$PRE" KEEP_META_EFF="$KEEP_META" DET_EFF="$DETER"
+  case "$PRE" in
+    light)   C_RES=300; G_RES=300; M_RES=1200; JPEGQ=78 ;;
+    extreme) C_RES=144; G_RES=144; M_RES=600;  JPEGQ=68 ;;
+    lossless)C_RES=0;   G_RES=0;   M_RES=0 ;;
+    archive) C_RES=240; G_RES=240; M_RES=900; KEEP_META_EFF=false; DET_EFF=true; JPEGQ=74 ;;
+    standard)
+      if (( C_CNT > 0 )); then
+        C_RES=$(( ${C_MED%.*} >= 380 ? 220 : 200 ))
+        if (( ${C_MIN%.*} > 0 )); then C_RES=$(awk -v min="$C_MIN" -v tgt="$C_RES" 'BEGIN{printf "%d",(min*0.8>tgt)?int(min*0.8):tgt}'); fi
+      fi
+      if (( G_CNT > 0 )); then
+        G_RES=$(( ${G_MED%.*} >= 380 ? 220 : 200 ))
+        if (( ${G_MIN%.*} > 0 )); then G_RES=$(awk -v min="$G_MIN" -v tgt="$G_RES" 'BEGIN{printf "%d",(min*0.8>tgt)?int(min*0.8):tgt}'); fi
+      fi
+      if (( M_CNT > 0 )); then M_RES=$(( ${M_MED%.*} >= 900 ? 900 : 600 )); fi
+      if (( C_CNT + G_CNT > 0 )); then JPEGQ=$(( (${C_MED%.*}+${G_MED%.*} >= 700) ? 68 : 74 )); fi
+      ;;
+    *) echo "Unknown preset: $PRE" >&2; return 2 ;;
+  esac
+  [[ -n "$JQ" ]] && JPEGQ="$JQ"
+
+  if $DEBUG; then
+    # Estimator (percentage range)
+    read -r EST_LOW EST_HIGH <<<"$(estimate_savings "$PRE" "$NO_IMAGES" "$C_CNT" "$G_CNT" "$M_CNT" "$C_MED" "$G_MED" "$M_MED" "$C_RES" "$G_RES" "$M_RES" "$JPEGQ")"
+    printf "DEBUG: %s\n" "$orig"
+    printf "  preset=%s  deterministic=%s  keep_metadata=%s  inplace=%s\n" "$PRE_EFF" "$DET_EFF" "$KEEP_META_EFF" "$INP"
+    printf "  bytes_orig=%s  encrypted=%s  no_images=%s\n" "$ORIG_BYTES" "$encrypted" "$NO_IMAGES"
+    printf "  imgs: color(cnt=%s, med=%.0f, min=%.0f)  gray(cnt=%s, med=%.0f, min=%.0f)  mono(cnt=%s, med=%.0f, min=%.0f)\n" \
+      "$C_CNT" "$C_MED" "$C_MIN" "$G_CNT" "$G_MED" "$G_MIN" "$M_CNT" "$M_MED" "$M_MIN"
+    printf "  chosen: C_RES=%s  G_RES=%s  M_RES=%s  JPEGQ=%s  path=%s\n" "$C_RES" "$G_RES" "$M_RES" "$JPEGQ" \
+      "$([[ "$PRE" == lossless || "$NO_IMAGES" == true ]] && echo 'lossless' || echo 'downsample')"
+    printf "  estimated_savings_pct ≈ %s–%s%%\n" "$EST_LOW" "$EST_HIGH"
+    return 0
+  fi
+
+  # 1) Ghostscript pass unless lossless or no images
+  if [[ "$PRE" == "lossless" || "$NO_IMAGES" == true ]]; then
+    cp "$tmp1" "$tmp2"
+  else
+    gs_pass "$tmp1" "$tmp2" "$JPEGQ" "$DET_EFF" "$C_RES" "$G_RES" "$M_RES"
+  fi
+
+  # 2) Final tidy / linearise / metadata
+  pdfcpu optimize -quiet "$tmp2" "$tmp3" 2>/dev/null || cp "$tmp2" "$tmp3"
+  qpdf --linearize "$tmp3" "${tmp3}.w" >/dev/null 2>&1 && mv "${tmp3}.w" "$tmp3" || true
+  mutool clean -z "$tmp3" "${tmp3}.c" >/dev/null 2>&1 && mv "${tmp3}.c" "$tmp3" || true
+  if ! $KEEP_META_EFF; then exiftool -overwrite_original -all= "$tmp3" >/dev/null 2>&1 || true; fi
+
+  local OUT_BYTES=$(size_of "$tmp3")
+  local SAVEPCT=$(awk -v a="$OUT_BYTES" -v b="$ORIG_BYTES" 'BEGIN{printf "%.2f",(b>0)?(100*(1-a/b)):0}')
+  local replace_ok=$(awk -v s="$SAVEPCT" -v m="$MINGAIN" -v a="$OUT_BYTES" -v b="$ORIG_BYTES" 'BEGIN{print (a<b && s>=m)?1:0}')
+  local note="ok"
+  if [[ "$replace_ok" -eq 1 ]]; then
+    if $INP; then mv "$tmp3" "$orig"; $KEEP_DT && restore_times "$orig" "$orig"; OUT="$orig"
+    else mv "$tmp3" "$OUT"; $KEEP_DT && restore_times "$orig" "$OUT"
+    fi
+  else
+    note="kept-original(below-threshold-or-larger)"; if ! $INP; then cp "$orig" "$OUT"; fi
+  fi
+
+  if $SIDECAR; then sha_sidecar pre "$orig" || true; sha_sidecar post "$OUT" || true; fi
+  if [[ -n "$POST_HOOK" ]]; then
+    IN="$orig"; OUT="$OUT"; ORIG_BYTES="$ORIG_BYTES"; OUT_BYTES="$OUT_BYTES"; PRESET="$PRE"; SAVEPCT="$SAVEPCT"
+    env IN="$IN" OUT="$OUT" ORIG_BYTES="$ORIG_BYTES" OUT_BYTES="$OUT_BYTES" PRESET="$PRESET" SAVEPCT="$SAVEPCT" /bin/zsh -lc "${POST_HOOK//\{\}/\"$OUT\"}" || true
+  fi
+  if [[ -n "$LOGFILE" ]]; then
+    local ratio; ratio=$(awk -v a="$OUT_BYTES" -v b="$ORIG_BYTES" 'BEGIN{printf "%.4f",(b>0)?a/b:1}')
+    printf '%s,%s,%s,%.4f,%s,%s\n' "$orig" "$ORIG_BYTES" "$OUT_BYTES" "$ratio" "$PRE" "$note" >> "$LOGFILE"
+  fi
+  $QUIET || printf '→ %s  (%.1f%% smaller)  [%s]\n' "$OUT" "$SAVEPCT" "$note"
+}
+
+run_wrapper() {
+  emulate -L zsh
+  local f="$1" out="${2-}"
+
+  if $DEBUG; then
+    printf 'DEBUG: run_wrapper: f="%s" out="%s"\n' "$f" "$out"
+  fi
+
+  if [[ -z "$f" ]]; then
+    $DEBUG && echo "DEBUG: SKIP (empty path arg)" || echo "SKIP (empty path arg)"
+    return 0
+  fi
+  if [[ ! -r "$f" ]]; then
+    $DEBUG && echo "DEBUG: SKIP (unreadable/missing): $f" || echo "SKIP (unreadable/missing): $f"
+    return 0
+  fi
+
+  if [[ -n "${SKIP_UNDER_RESOLVED:-}" ]]; then
+    local sz; sz=$(size_of "$f")
+    if [[ -n "$sz" && "$sz" -lt "$SKIP_UNDER_RESOLVED" ]]; then
+      $DEBUG && echo "DEBUG: SKIP (below ${SKIP_UNDER_BYTES}): $f" || echo "SKIP (below ${SKIP_UNDER_BYTES}): $f"
+      return 0
+    fi
+  fi
+
+  if [[ "${DRYRUN:-false}" == true ]]; then
+    # We want a concise dry-run output with estimated savings.
+    # Use same analysis pipeline as process_one(), but no writes.
+    local tmp1="$(mktemp -t pdfsqueeze.dry.XXXXXX)"
+    local preset="$PRESET"
+    local jpegq="${JPEGQ_OVERRIDE:-74}"
+    local ORIG_BYTES=$(size_of "$f")
+
+    # Structural optimise to normalise before analysis
+    if ! pdfcpu optimize -quiet "$f" "$tmp1" >/dev/null 2>&1; then
+        cp "$f" "$tmp1" || { echo "DRY: $f (unreadable)"; return 0; }
+    fi
+
+    # Get image stats
+    read -r C_CNT G_CNT M_CNT C_MED G_MED M_MED C_MIN G_MIN M_MIN <<<"$(analyse_pdf "$tmp1")"
+    local NO_IMAGES=false; (( C_CNT + G_CNT + M_CNT == 0 )) && NO_IMAGES=true
+
+    # Figure out effective JPEGQ if overridden
+    case "$preset" in
+        light)   jpegq=78 ;;
+        extreme) jpegq=68 ;;
+        archive) jpegq=74 ;;
+        lossless) jpegq=74 ;;
+        standard) jpegq=${jpegq:-74} ;;
+    esac
+
+    # Choose target resolutions same as process_one
+    local C_RES=200 G_RES=200 M_RES=900
+    case "$preset" in
+        light)   C_RES=300; G_RES=300; M_RES=1200 ;;
+        extreme) C_RES=144; G_RES=144; M_RES=600 ;;
+        archive) C_RES=240; G_RES=240; M_RES=900 ;;
+        lossless)C_RES=0; G_RES=0; M_RES=0 ;;
+        standard)
+            if (( C_CNT > 0 )); then
+                C_RES=$(( ${C_MED%.*} >= 380 ? 220 : 200 ))
+                (( ${C_MIN%.*} > 0 )) && \
+                  C_RES=$(awk -v min="$C_MIN" -v tgt="$C_RES" 'BEGIN{printf "%d",(min*0.8>tgt)?int(min*0.8):tgt}')
+            fi
+            if (( G_CNT > 0 )); then
+                G_RES=$(( ${G_MED%.*} >= 380 ? 220 : 200 ))
+                (( ${G_MIN%.*} > 0 )) && \
+                  G_RES=$(awk -v min="$G_MIN" -v tgt="$G_RES" 'BEGIN{printf "%d",(min*0.8>tgt)?int(min*0.8):tgt}')
+            fi
+            if (( M_CNT > 0 )); then M_RES=$(( ${M_MED%.*} >= 900 ? 900 : 600 )); fi
+            ;;
+    esac
+
+    # Call estimator
+    read -r EST_LOW EST_HIGH <<<"$(estimate_savings "$preset" "$NO_IMAGES" "$C_CNT" "$G_CNT" "$M_CNT" "$C_MED" "$G_MED" "$M_MED" "$C_RES" "$G_RES" "$M_RES" "$jpegq")"
+
+    # Compute estimated output sizes
+    # low/high are % reductions; convert to absolute output bytes
+    local est_low_bytes est_high_bytes
+    est_low_bytes=$(awk -v o="$ORIG_BYTES" -v p="$EST_HIGH" 'BEGIN{print (o*(100-p)/100)}')
+    est_high_bytes=$(awk -v o="$ORIG_BYTES" -v p="$EST_LOW"  'BEGIN{print (o*(100-p)/100)}')
+
+    printf 'DRY: %s  preset=%s  est_savings≈%s–%s%%  est_size≈%s–%s (from %s)\n' \
+        "$f" "$preset" "$EST_LOW" "$EST_HIGH" \
+        "$(fmt_bytes "$est_low_bytes")" "$(fmt_bytes "$est_high_bytes")" \
+        "$(fmt_bytes "$ORIG_BYTES")"
+
+    rm -f "$tmp1" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  # *** Call process_one directly on ONE line; no arrays, no continuations. ***
+  process_one "$f" "" "$PRESET" "$JPEGQ_OVERRIDE" "$INPLACE" "$KEEP_METADATA" "$KEEP_DATE" "$MIN_GAIN" "$DETERMINISTIC" "$PASSWORD" "$POST_HOOK" "$SIDECAR"
+}
+
+# SKIP_UNDER_RESOLVED=""; [[ -n "$SKIP_UNDER_BYTES" ]] && SKIP_UNDER_RESOLVED="$(parse_bytes "$SKIP_UNDER_BYTES")"
+
+if $INTERNAL_ONE; then
+  f="${FILES[1]}"; run_wrapper "$f" ""; exit 0
+fi
+if [[ -n "$OUT_SINGLE" ]]; then run_wrapper "${FILES[1]}" "$OUT_SINGLE"; exit 0; fi
+
+if (( JOBS > 1 )) && $PARALLEL_OK; then
+  env PRESET="$PRESET" JPEGQ_OVERRIDE="$JPEGQ_OVERRIDE" INPLACE="$INPLACE" \
+      KEEP_METADATA="$KEEP_METADATA" KEEP_DATE="$KEEP_DATE" MIN_GAIN="$MIN_GAIN" \
+      DETERMINISTIC="$DETERMINISTIC" PASSWORD="$PASSWORD" POST_HOOK="$POST_HOOK" \
+      SIDECAR="$SIDECAR" DRYRUN="$DRYRUN" DEBUG="$DEBUG" \
+      SKIP_UNDER_BYTES="$SKIP_UNDER_BYTES" SKIP_UNDER_RESOLVED="$SKIP_UNDER_RESOLVED" \
+      LOGFILE="$LOGFILE" QUIET="$QUIET" \
+  command parallel -j "$JOBS" --no-notice --will-cite -- \
+    "$0" --internal-one {} ::: "${FILES[@]}"
+else
+  for f in "${FILES[@]}"; do run_wrapper "$f" ""; done
+fi
