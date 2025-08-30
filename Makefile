@@ -1,65 +1,69 @@
 # Makefile for pdf-squeeze project + DEVONthink scripts
 # Typical use
-# cd ~/Developer/pdf-squeeze
+# cd pdf-squeeze
 # make install-bin        # installs ./pdf-squeeze → ~/bin/pdf-squeeze (default)
 # make compile            # compiles .applescript → .scpt into devonthink-scripts/compiled
 # make install-dt         # copies compiled .scpt into DEVONthink’s App Scripts folder
 # or do both:
 # make install            # = install-bin + install-dt
+SHELL := /bin/bash
 
+REPO_ROOT      := $(CURDIR)
+SRC_DIR        := devonthink-scripts/src
+COMPILED_DIR   := devonthink-scripts/compiled
 
-SHELL := /bin/zsh
-CUR := $(CURDIR)
+# DEVONthink version: 4 (default) or 3
+DT_VER ?= 4
 
-# --- Layout inside your repo ---
-DT_SRC_DIR := $(CUR)/devonthink-scripts/src
-DT_OUT_DIR := $(CUR)/devonthink-scripts/compiled
+ifeq ($(DT_VER),4)
+DT_BUNDLE := com.devon-technologies.think
+else ifeq ($(DT_VER),3)
+DT_BUNDLE := com.devon-technologies.think3
+else
+$(error DT_VER must be 3 or 4)
+endif
 
-# --- Where DEVONthink 4 loads .scpt from ---
-DT_APP_SCRIPTS := $(HOME)/Library/Application Scripts/com.devon-technologies.think
+DT_SCRIPTS_DIR := $(HOME)/Library/Application Scripts/$(DT_BUNDLE)
 
-# --- Where to install the pdf-squeeze CLI (no sudo) ---
-# Prefer user bin; don’t use /usr/bin (system-protected). /usr/local/bin is also fine.
-BIN_DIR ?= $(HOME)/bin
+.PHONY: compile install-scripts clean show-paths test test-clean
 
-# --- Sources / Targets ---
-SCRIPTS := $(wildcard $(DT_SRC_DIR)/*.applescript)
-COMPILED := $(patsubst $(DT_SRC_DIR)/%.applescript,$(DT_OUT_DIR)/%.scpt,$(SCRIPTS))
+show-paths:
+	@echo "SRC_DIR:        $(SRC_DIR)"
+	@echo "COMPILED_DIR:   $(COMPILED_DIR)"
+	@echo "DT_VER:         $(DT_VER)"
+	@echo "DT_SCRIPTS_DIR: $(DT_SCRIPTS_DIR)"
 
-# --- Default ---
-.PHONY: all
-all: compile
+compile:
+	@set -euo pipefail; \
+	mkdir -p "$(COMPILED_DIR)"; \
+	found=0; \
+	while IFS= read -r -d '' f; do \
+	  found=1; \
+	  base="$${f##*/}"; \
+	  out="$(COMPILED_DIR)/$${base%.applescript}.scpt"; \
+	  echo "Compiling: $$f -> $$out"; \
+	  osacompile -l AppleScript -o "$$out" "$$f"; \
+	done < <(find "$(SRC_DIR)" -type f -name '*.applescript' -print0); \
+	if [[ $$found -eq 0 ]]; then \
+	  echo "No .applescript files found in $(SRC_DIR)"; \
+	fi
 
-# --- Compile AppleScripts ---
-.PHONY: compile
-compile: $(COMPILED)
+install-scripts: compile
+	@set -euo pipefail; \
+	mkdir -p "$(DT_SCRIPTS_DIR)"; \
+	while IFS= read -r -d '' f; do \
+	  echo "Installing: $$f -> $(DT_SCRIPTS_DIR)/$${f##*/}"; \
+	  cp -f "$$f" "$(DT_SCRIPTS_DIR)/"; \
+	done < <(find "$(COMPILED_DIR)" -type f -name '*.scpt' -print0); \
+	echo "Installed to: $(DT_SCRIPTS_DIR)"
 
-$(DT_OUT_DIR)/%.scpt: $(DT_SRC_DIR)/%.applescript
-	@mkdir -p "$(DT_OUT_DIR)"
-	@osacompile -o "$@" "$<"
-	@echo "Compiled $< → $@"
-
-# --- Install compiled .scpt into DEVONthink 4’s script folder ---
-.PHONY: install-dt
-install-dt: compile
-	@mkdir -p "$(DT_APP_SCRIPTS)"
-	@cp "$(DT_OUT_DIR)"/*.scpt "$(DT_APP_SCRIPTS)/"
-	@echo "Installed DEVONthink scripts → $(DT_APP_SCRIPTS)"
-
-# --- Install the pdf-squeeze CLI into BIN_DIR and make it executable ---
-# If you prefer /usr/local/bin set BIN_DIR=/usr/local/bin when invoking make.
-.PHONY: install-bin
-install-bin:
-	@mkdir -p "$(BIN_DIR)"
-	@install -m 0755 pdf-squeeze "$(BIN_DIR)/pdf-squeeze"
-	@echo "Installed pdf-squeeze → $(BIN_DIR)/pdf-squeeze"
-
-# --- Convenience: everything ---
-.PHONY: install
-install: install-bin install-dt
-
-# --- Clean compiled scripts (sources remain) ---
-.PHONY: clean
 clean:
-	@rm -f "$(DT_OUT_DIR)"/*.scpt 2>/dev/null || true
-	@echo "Cleaned compiled scripts in $(DT_OUT_DIR)"
+	@rm -rf "$(COMPILED_DIR)"
+	@echo "Removed $(COMPILED_DIR)"
+
+test:
+	@chmod +x tests/*.sh
+	@tests/run.sh
+
+test-clean:
+	@rm -rf tests/build tests/assets

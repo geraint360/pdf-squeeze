@@ -3,65 +3,62 @@
 -- Put into ~/Library/Application Scripts/com.devon-technologies.think/Smart Rules
 -- Logging: ~/Library/Logs/pdf-squeeze.log
 
-on pathToPdfSqueeze()
-	-- Ordered candidates: user bin, Homebrew (arm64), Homebrew (intel), system
-	set candidates to {POSIX path of (path to home folder) & "bin/pdf-squeeze", ¬
-		"/opt/homebrew/bin/pdf-squeeze", "/usr/local/bin/pdf-squeeze", "/usr/bin/pdf-squeeze"}
-	repeat with p in candidates
-		try
-			do shell script "test -x " & quoted form of p
-			return p
-		end try
-	end repeat
-	try
-		set found to do shell script "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin command -v pdf-squeeze || true"
-		if found is not "" then return found
-	end try
-	error "pdf-squeeze not found. Install it (make install-bin) or adjust your PATH."
-end pathToPdfSqueeze
+on logMsg(m)
+  try
+    set ts to do shell script "/bin/date '+%Y-%m-%d %H:%M:%S'"
+    set logline to ts & " [Smart Rule] " & m & linefeed
+    do shell script "/bin/mkdir -p ~/Library/Logs; /usr/bin/printf %s " & quoted form of logline & " >> ~/Library/Logs/pdf-squeeze.log"
+  end try
+end logMsg
 
--- Smart Rule - PDF Squeeze.scpt (DEVONthink 4)
--- Attach this to your Smart Rule with “Execute Script”
-property logFile : (POSIX path of (path to library folder from user domain)) & "Logs/pdf-squeeze.log"
+on findTool()
+  set sh to "
+    if [ -x \"$HOME/bin/pdf-squeeze\" ]; then
+      echo \"$HOME/bin/pdf-squeeze\";
+    elif command -v pdf-squeeze >/dev/null 2>&1; then
+      command -v pdf-squeeze;
+    elif [ -x /opt/homebrew/bin/pdf-squeeze ]; then
+      echo /opt/homebrew/bin/pdf-squeeze;
+    elif [ -x /usr/local/bin/pdf-squeeze ]; then
+      echo /usr/local/bin/pdf-squeeze;
+    else
+      echo '';
+    fi"
+  set p to do shell script sh
+  if p is "" then error "pdf-squeeze not found. Put it in ~/bin or install via Homebrew."
+  return p
+end findTool
 
-on writeLog(msg)
-	try
-		do shell script "mkdir -p " & quoted form of ((POSIX path of (path to library folder from user domain)) & "Logs/")
-		do shell script "printf %s " & quoted form of (msg & linefeed) & " >> " & quoted form of logFile
-	end try
-end writeLog
-
+-- Use the single-word handler that DT3/DT4 both support
 on performSmartRule(theRecords)
-	set tool to my pathToPdfSqueeze()
-	repeat with r in theRecords
-		try
-			tell application id "DNtp"
-				set thePath to (path of r as string)
-			end tell
-			set p to POSIX path of thePath
-			set cmd to quoted form of tool & " --inplace --min-gain 1 " & quoted form of p
-			my writeLog("SmartRule: " & cmd)
-			do shell script cmd
-			my writeLog("SmartRule OK: " & p)
-		on error errMsg number errNum
-			my writeLog("SmartRule ERROR(" & errNum & "): " & errMsg)
-		end try
-	end repeat
-end performSmartRule
+  try
+    set toolPath to my findTool()
+    my logMsg("Tool: " & toolPath & " ; records=" & (count of theRecords as text))
 
--- same helper:
-on pathToPdfSqueeze()
-	set candidates to {POSIX path of (path to home folder) & "bin/pdf-squeeze", ¬
-		"/opt/homebrew/bin/pdf-squeeze", "/usr/local/bin/pdf-squeeze", "/usr/bin/pdf-squeeze"}
-	repeat with p in candidates
-		try
-			do shell script "test -x " & quoted form of p
-			return p
-		end try
-	end repeat
-	try
-		set found to do shell script "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin command -v pdf-squeeze || true"
-		if found is not "" then return found
-	end try
-	error "pdf-squeeze not found. Install it (make install-bin) or adjust your PATH."
-end pathToPdfSqueeze
+    tell application id "DNtp" -- DEVONthink 4 (and DT3) bundle id
+      repeat with r in theRecords
+        try
+          if (type of r is PDF document) then
+            set nm to (name of r as text)
+            set pth to (path of r)
+            if pth is not missing value then
+              set cmd to quoted form of toolPath & " --inplace --min-gain 1 " & quoted form of pth & " 2>&1"
+              my logMsg("Running on: " & nm & "  (" & pth & ")")
+              set out to do shell script cmd
+              if out is not "" then my logMsg("Output:" & linefeed & out)
+              update record r
+              my logMsg("Done: " & nm)
+            else
+              my logMsg("SKIP (no file path): " & nm)
+            end if
+          end if
+        on error errMsg number errNum
+          my logMsg("ERROR on record '" & (name of r as text) & "': " & errMsg & " (" & errNum & ")")
+        end try
+      end repeat
+    end tell
+  on error errMsg number errNum
+    my logMsg("FATAL: " & errMsg & " (" & errNum & ")")
+    display notification errMsg with title "pdf-squeeze smart rule"
+  end try
+end performSmartRule

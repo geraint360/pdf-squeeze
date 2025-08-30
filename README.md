@@ -228,24 +228,6 @@ pdf-squeeze --dry-run --recurse ~/Scans
 
 ---
 
-## Troubleshooting
-
-- **“No PDFs found.”**  
-  Check your path/quotes; without `--recurse`, directories aren’t descended.
-- **“SKIP (encrypted)”**  
-  Supply a password: `--password '…'` or `--password-file path`.
-- **“SKIP (below …)”** or **“kept-original(below-threshold-or-larger)”**  
-  Either the output was not smaller, or it didn’t meet `--min-gain`. Lower `--min-gain`, or try `-p extreme` / `-q 72`.
-- **Tiny savings on vector-only PDFs**  
-  Expected; there’s little to compress beyond structure.
-- **File looks slightly soft**  
-  Use `-p light`, or keep `standard` and raise `-q` (e.g., `-q 80`).  
-  For scan-heavy docs, `standard` generally preserves small text; `extreme` is for when size matters more.
-
-Run with `--debug` to see exactly what the tool intends (inputs, DPI choices, JPEG Q, estimated savings).
-
----
-
 ## Exit status
 
 - `0` success (including “skipped” files)
@@ -269,6 +251,117 @@ Run with `--debug` to see exactly what the tool intends (inputs, DPI choices, JP
 
 ---
 
+## DEVONthink Integration
+
+	1.	**Compress Now** — a menu/toolbar action to compress the selected PDFs.
+	2.	**Smart Rule Handler** — a script for DEVONthink rules to compress PDFs that match conditions (e.g. added to a group, file size > X, etc).
+
+### Compile AppleScripts
+
+A) Using the command line
+
+```
+# From the repo root
+osacompile -l AppleScript \
+  -o devonthink-scripts/compiled/CompressNow.scpt \
+  devonthink-scripts/src/CompressNow.applescript
+
+osacompile -l AppleScript \
+  -o devonthink-scripts/compiled/SmartRule.scpt \
+  devonthink-scripts/src/SmartRule.applescript
+```
+
+B) Using the provided Makefile
+
+```
+# Compile both to devonthink-scripts/compiled/
+make compile
+```
+
+### DEVONthink 4
+
+Copy the compiled scripts into ~/Library/Application Scripts/com.devon-technologies.think
+
+```
+mkdir -p ~/Library/Application\ Scripts/com.devon-technologies.think
+cp devonthink-scripts/compiled/*.scpt \
+   ~/Library/Application\ Scripts/com.devon-technologies.think/
+
+# Or:
+make install-scripts DT_VER=4
+```   
+
+### DEVONthink 3
+
+Copy the compiled scripts into ~/Library/Application Scripts/com.devon-technologies.think3
+
+```
+mkdir -p ~/Library/Application\ Scripts/com.devon-technologies.think3
+cp devonthink-scripts/compiled/*.scpt \
+   ~/Library/Application\ Scripts/com.devon-technologies.think3/
+
+# Or:
+make install-scripts DT_VER=3
+```
+
+### Using the scripts inside DEVONthink
+
+**Compress Now**
+- Open Preferences → Scripts and ensure the scripts folder is enabled.
+- Add the script to the Toolbar (View → Customize Toolbar) or run it from the Scripts menu.
+
+**Smart Rule Handler**
+- Create a Smart Rule (Tools → New Smart Rule…)
+- Choose your conditions (e.g. Kind is PDF, Size > 300 KB, etc.)
+- Perform the following actions → choose Run Script… and select SmartRule.scpt.
+
+### Suggested flags for DEVONthink
+
+| Mode     | Flags |
+|------------|--------------------------|
+| Safe default | `--inplace --min-gain 1` |
+| For tighter compression on scans | `-p standard --inplace --min-gain 3` |
+| For archival with stripped metadata | `-p archive --inplace --min-gain 1 --strip-metadata` |
+
+Edit the header variables inside src/*.applescript to set your preferred defaults.
+
+---
+
+## Troubleshooting
+
+- **“No PDFs found.”**  
+  Check your path/quotes; without `--recurse`, directories aren’t descended.
+- **“SKIP (encrypted)”**  
+  Supply a password: `--password '…'` or `--password-file path`.
+- **“SKIP (below …)”** or **“kept-original(below-threshold-or-larger)”**  
+  Either the output was not smaller, or it didn’t meet `--min-gain`. Lower `--min-gain`, or try `-p extreme` / `-q 72`.
+- **Tiny savings on vector-only PDFs**  
+  Expected; there’s little to compress beyond structure.
+- **File looks slightly soft**  
+  Use `-p light`, or keep `standard` and raise `-q` (e.g., `-q 80`).  
+  For scan-heavy docs, `standard` generally preserves small text; `extreme` is for when size matters more.
+
+Run with `--debug` to see exactly what the tool intends (inputs, DPI choices, JPEG Q, estimated savings).
+
+### DEVONthink Troubleshooting
+
+Automation permissions
+The first run may prompt macOS to allow DEVONthink to run scripts and the script to run external tools.
+Allow when prompted:
+- System Settings → Privacy & Security → Automation (and optionally Full Disk Access).
+
+*Tool not found*
+If the AppleScript says it cannot find pdf-squeeze, ensure it’s installed in one of the searched paths or add its location to the script.
+
+*Smart Rule doesn’t fire*
+Check that:
+- Rule conditions are correct.
+- The Perform → Run Script points to the compiled .scpt in the right Application Scripts folder for your DEVONthink version.
+
+*No size savings*
+Some PDFs are mostly vector text or already optimized; try --debug or --dry-run to see the analysis.
+
+---
 ## Uninstall / Update
 
 Just remove or replace the single script:
