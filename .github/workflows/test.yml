@@ -1,0 +1,76 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /Library/Caches/Homebrew
+          key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/test.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-brew-
+
+      - name: Install dependencies (macOS)
+        run: |
+          brew update
+          brew install ghostscript parallel pdfcpu
+          pdfcpu version
+
+      - name: Make script executable
+        run: chmod +x pdf-squeeze
+
+      - name: Run tests
+        env:
+          PDF_SQUEEZE_TEST_JOBS: "4"
+        run: make test
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-macos
+          path: tests/build/logs
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghostscript parallel curl tar
+          # Install pdfcpu (latest)
+          PDFCPU_URL=$(curl -s https://api.github.com/repos/pdfcpu/pdfcpu/releases/latest \
+            | grep browser_download_url | grep linux | grep x86_64 | cut -d '"' -f 4 | head -n1)
+          curl -L "$PDFCPU_URL" -o pdfcpu.tar.gz
+          tar -xzf pdfcpu.tar.gz
+          sudo mv pdfcpu*/pdfcpu /usr/local/bin/pdfcpu
+          pdfcpu version
+
+      - name: Make script executable
+        run: chmod +x pdf-squeeze
+
+      - name: Run tests
+        env:
+          PDF_SQUEEZE_TEST_JOBS: "4"
+        run: make test
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-linux
+          path: tests/build/logs
