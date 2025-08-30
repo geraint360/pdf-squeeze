@@ -1,212 +1,151 @@
-# `pdf-squeeze` — high-quality PDF compression for macOS (zsh, Apple Silicon)
+# pdf-squeeze
 
-PDF compressor for the command line.  
-Auto-tunes per file by analysing embedded images; preserves vector text and layout.  
-Written for Apple Silicon; no Rosetta.
-Designed to replace PDFSqueezer.app which is an excellent tool but still relies on Rosetta.
+A fast, batteries‑included PDF size reducer for macOS. Targets *sane* file‑size savings while keeping documents readable and searchable. Ships as a single script (`pdf-squeeze`, uses **zsh**) with pragmatic defaults and safety rails.
 
-- zsh-native (no bashisms)
-- Presets: **light**, **standard** (default), **extreme**, **lossless**, **archive**
-- Batch, recurse, include/exclude filters, parallel workers
-- In-place atomic replace or write to new file
-- Metadata & timestamps preserved by default
-- Deterministic IDs (stable output for the same input)
-- Sidecar SHA-256, CSV logging, post-processing hook
-- **No OCR** (by design; let DEVONthink or your OCR tool handle that)
+> Typical savings for mixed documents are 20–70% depending on content and preset. See **Presets** and examples below.
 
-Current script header: `version="2.2.0-zsh"`
+---
+
+## Features
+
+- Simple CLI: `pdf-squeeze input.pdf -o output.pdf` (or compress in place with `--inplace`)
+- Multiple presets tuned for different trade‑offs: **light**, **standard**, **extreme**, **lossless**, **archive**
+- Batch processing (files or folders), recursion, include/exclude filters, and parallel jobs
+- Dry‑run estimator with projected size and savings (no writes)
+- Skip rules to avoid work on tiny files or when savings would be negligible
+- Timestamp‑friendly: preserves mtime for in‑place operations (APFS granularity tolerated)
+- Optional password handling for encrypted PDFs (`--password`); otherwise it will **skip or pass‑through** safely
+- Deterministic behavior and stable output naming (`*_squeezed.pdf`), unless `-o`/`--inplace` is used
+- CSV logging (if your build advertises `--csv`, the tests auto‑detect this)
+- Post‑hook support for integrations (e.g., re-indexing), see **Integration notes**
+
+---
+
+## Requirements
+
+macOS (tested on Sonoma) with the following tools installed:
+
+- **Ghostscript** (`gs`)
+- **pdfcpu**
+- **qpdf** (for encrypted‑PDF handling and tests)
+
+Install via Homebrew:
+
+```bash
+brew install ghostscript pdfcpu qpdf
+```
+
+The script is **zsh**; macOS ships with zsh by default.
 
 ---
 
 ## Installation
 
-### 1) Dependencies (Homebrew)
-
+### Quick
 ```bash
-brew install ghostscript pdfcpu qpdf mupdf exiftool poppler coreutils
-# Optional (enables --jobs N parallelism):
-brew install parallel
+make install-bin          # installs ./pdf-squeeze → ~/bin/pdf-squeeze (default)
+```
+Ensure `~/bin` is on your `PATH`. Override the target with:
+```bash
+make install-bin PREFIX=/some/other/bin
 ```
 
-**Why each is needed**
-- `ghostscript` — image downsampling/re-encoding, font subsetting
-- `pdfcpu` — structural optimisation, final tidy/linearise
-- `qpdf` — decryption (no in-place mutation), linearise fallback
-- `mupdf` (`mutool`) — additional clean/deflate of resources
-- `exiftool` — metadata strip (when requested)
-- `poppler` (`pdfinfo`, `pdfimages`) — image/ppi analysis
-- `coreutils` — `gstat`, `sha256sum` on macOS
-- `parallel` — optional speed-up for many files
-
-### 2) Script
-
-Save the script as `~/bin/pdf-squeeze`, make it executable, and put `~/bin` on your PATH:
+### DEVONthink scripts (optional)
+If you want the accompanying DEVONthink automations:
 
 ```bash
-mkdir -p ~/bin
-mv /path/to/pdf-squeeze ~/bin/pdf-squeeze
-chmod +x ~/bin/pdf-squeeze
-
-# Ensure ~/bin is on PATH (zsh):
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-exec zsh -l
+make compile              # compiles .applescript → .scpt under devonthink-scripts/compiled
+make install-dt           # installs compiled .scpt into DEVONthink’s “App Scripts” folder
+# Or both:
+make install              # = install-bin + install-dt
 ```
-
-### 3) Verify
-
-```bash
-pdf-squeeze --check-deps
-pdf-squeeze --help
-```
-
----
-
-## Quick start
-
-```bash
-# Write "…_squeezed.pdf" next to the input
-pdf-squeeze ~/Docs/Report.pdf
-
-# In-place replacement (atomic), keep metadata & dates (default), skip tiny files
-pdf-squeeze --inplace --skip-if-smaller 200KB ~/Scans/Invoice.pdf
-
-# Recurse a folder, 6 workers, require ≥2% size reduction to replace
-pdf-squeeze --recurse --jobs 6 --inplace --min-gain 2 ~/Scans
-
-# See what would happen (preset + estimated saving & size range)
-pdf-squeeze --dry-run ~/Scans/*.pdf
-
-# Detailed reasoning without writing (DPI, JPEGQ, path, estimates)
-pdf-squeeze --debug ~/Scans/Scan\ 002.pdf
-```
-
----
-
-## Presets (compression profiles)
-
-| Preset     | Colour/Greyscale target | Mono (bilevel) | JPEG quality | Notes |
-|------------|--------------------------|----------------|--------------|-------|
-| `standard` | ~200–220 dpi (auto, ≥80% of file’s min PPI for safety) | ~900 dpi | ~74 | Balanced; default; keeps text crisp |
-| `light`    | 300 dpi                  | 1200 dpi       | ~78          | Gentle size reduction |
-| `extreme`  | 144 dpi                  | 600 dpi        | ~68          | Aggressive (closest to PDF Squeezer-style output) |
-| `lossless` | no downsampling          | no downsampling| n/a          | Structural only (1–6% typical) |
-| `archive`  | 240 dpi                  | 900 dpi        | ~74          | Deterministic + strip metadata |
-
-**JPEG quality override:** `-q N` forces colour/grey JPEG Q (1–100) regardless of preset.
 
 ---
 
 ## Usage
 
-```
-pdf-squeeze [OPTIONS] INPUT...
-
-INPUT may be one or more files and/or directories. Directories respect --recurse.
+```bash
+pdf-squeeze [options] <file-or-dir>...
 ```
 
-### Core options
+### Common options
 
-- `-p {standard|light|extreme|lossless|archive}` — choose preset (default: `standard`)
-- `--inplace` — replace original atomically (safe temp + move)
-- `-o OUT` — write to a single output path (only valid when a single input file is given)
-- `--recurse` — descend into subdirectories when an input is a directory
-- `--jobs N` — process up to N files in parallel (requires `parallel`)
+- `-p, --preset <name>`: one of `light`, `standard`, `extreme`, `lossless`, `archive`
+- `-o, --output <file>`: explicit output file (single input only)
+- `--inplace`           : write back to the same path (mtime preserved within ~2m tolerance)
+- `--dry-run`           : print an estimate only, no files written
+- `--recurse`           : when given directories, walk them recursively
+- `--include <regex>`   : process only paths matching the regex
+- `--exclude <regex>`   : skip paths matching the regex
+- `--jobs <N>`          : parallel workers for batch mode
+- `--min-gain <pct>`    : only keep the compressed result if it’s at least this % smaller
+- `--skip-if-smaller <SIZE>` : immediately skip inputs smaller than the given size (e.g. `5MB`, `200k`)
+- `--password <pw>`     : password for encrypted PDFs; otherwise the tool will skip/keep original safely
+- `--csv <file>`        : (if available) append a CSV row per processed input
+- `--post-hook '<cmd>'` : run a command after each processed file; `{}` is replaced with output path
+- `--quiet`             : suppress the usual “arrow” result line
+- `--version`, `--help`
 
-### Quality/heuristics
+**Output naming:** if you don’t use `-o` or `--inplace`, results are written next to the input as `*_squeezed.pdf`.
 
-- `-q N` — force JPEG quality for colour/grey images (1–100), overriding preset
-- `--min-gain PCT` — skip replace if saving is below PCT (default `1`)
-- `--skip-if-smaller SIZE` — skip files smaller than SIZE  
-  (SIZE accepts `K/KB`, `M/MB`, `G/GB`, e.g., `200KB`, `1.5MB`)
+### Preset strength ordering
 
-### Filtering (regex on full path)
-
-- `--exclude REGEX` — skip matching paths (repeatable)
-- `--include REGEX` — include only matching paths (repeatable). If any `--include` is supplied, non-matches are excluded.
-
-### Metadata, timestamps, determinism
-
-- `--keep-metadata` (default) | `--strip-metadata`
-- `--keep-date` (default) | `--no-keep-date` — preserve atime/mtime on output
-- `--deterministic` (default) | `--no-deterministic` — stable IDs for reproducible output
-
-### Security (encrypted PDFs)
-
-- `--password TEXT` | `--password-file FILE`  
-  If the file is encrypted and a password is provided, it is **decrypted to a temp file** first (original not modified) and then processed.  
-  If no password and the file is encrypted: the file is **skipped**.
-
-### Dry-run / diagnostics / logging
-
-- `--dry-run` — analyse only; print **preset, estimated savings %, and estimated size range**
-- `--debug` — detailed analysis (ppi, counts, chosen DPI/JPEGQ/path, estimated %); no writes
-- `--log CSV` — append CSV: `input_path,bytes_in,bytes_out,ratio,preset,note`
-- `--sidecar-sha256` — write `input.pdf.pre.sha256` and `output.pdf.post.sha256`
-- `--post-hook 'CMD {}'` — run a shell command per processed file; `{}` is replaced with output path.  
-  Environment is populated: `IN`, `OUT`, `ORIG_BYTES`, `OUT_BYTES`, `PRESET`, `SAVEPCT`
-
-### Other
-
-- `--check-deps` — verify required/optional tools and exit
-- `--quiet` — suppress normal “→ … (xx.x% smaller)” output
-- `--help`, `--version`
-
----
-
-## What the tool actually does (pipeline)
-
-1. **Structural normalisation** (`pdfcpu optimize`) → fast size wins (1–6% typical)
-2. **Image analysis** (`pdfimages -list`) → detect image count and **x/y PPI** per class:
-   - colour (`rgb/cmyk/icc`)
-   - grey
-   - mono (bilevel; fallback using `bpc==1`)
-3. **Preset selection & tuning**:
-   - For `standard`, targets ~200–220 dpi but **never drops below 80% of the file’s minimum detected PPI** (to avoid blurring fine content).  
-     JPEG quality defaults to ~74; lowered to 68 for very high-ppi originals.
-4. **Image downsampling & re-encode** (`ghostscript`):
-   - Colour/grey: DCT (JPEG)
-   - Mono: JBIG2 **lossless** (`-dJBIG2Lossless=true`)
-   - Fonts: subset + compress; pages not rotated; colour profiles left unchanged
-5. **Final tidy**:
-   - `pdfcpu optimize` (second pass)
-   - `qpdf --linearize` (fast web view; best-effort)
-   - `mutool clean -z` (deflate resources)
-   - Optionally `exiftool -all=` to strip metadata
-6. **Decision**:
-   - Replace only if `bytes_out < bytes_in` **and** saving ≥ `--min-gain`
-   - Preserve timestamps with `--keep-date`
-
----
-
-## Estimation logic (`--dry-run` and `--debug`)
-
-- Structural base win: 1–6%
-- Image downsampling gain: approximated from `(target/median PPI)^2`, clipped, per class
-- Mono (bilevel): JBIG2 **lossless** additional 10–60% typical (conservative midpoint added)
-- Weighted by class counts
-- Quality bonus: Q≤68 gives a few extra points
-- Reported as a range (±30% around mid), but clamped to [3%, 90%]
-
-Dry-run prints both **% range** and **estimated output size range**.
+By design: `extreme ≤ standard ≤ light` in resulting size (within ~5%).  
+`lossless` preserves quality/structure as much as possible; `archive` aims for highest compression that still prints well.
 
 ---
 
 ## Examples
 
+Basic:
 ```bash
-# Match PDF Squeezer-ish behaviour on scans (aggressive)
-pdf-squeeze -p extreme --inplace ~/Scans/*.pdf
+pdf-squeeze -p standard input.pdf -o output.pdf
+```
 
-# Conservative archive of research papers (strip metadata, deterministic)
-pdf-squeeze -p archive --inplace ~/Papers
+Estimate only:
+```bash
+pdf-squeeze --dry-run -p light input.pdf
+# DRY: input.pdf  est_savings≈42%  est_size≈1.2MB (from 2.1MB)
+```
 
-# Only process files ≥ 1.5 MB, skip any saving under 3%
-pdf-squeeze --skip-if-smaller 1.5MB --min-gain 3 --inplace ~/Downloads
+In place (preserve mtime; only keep if ≥25% smaller):
+```bash
+pdf-squeeze -p extreme --inplace --min-gain 25 input.pdf
+```
 
-# Run a post-hook (e.g., re-index in DEVONthink or log somewhere)
+Batch a folder, recurse, include only paths under “/Reports/” and exclude “/Drafts/”, 4 workers:
+```bash
+pdf-squeeze -p standard --recurse \
+  --include '/Reports/' --exclude '/Drafts/' \
+  --jobs 4 ~/Documents/PDFs
+```
+
+Skip tiny files (<5MB) quickly:
+```bash
+pdf-squeeze --skip-if-smaller 5MB my.pdf -o my_small.pdf
+```
+
+Encrypted inputs:
+```bash
+# Without a password the tool will print SKIP or keep the original.
+pdf-squeeze input_encrypted.pdf -o out.pdf
+
+# Provide password to actually compress:
+pdf-squeeze --password secret -p light input_encrypted.pdf -o out.pdf
+```
+
+CSV logging:
+```bash
+pdf-squeeze -p light --csv report.csv some/folder --jobs 2
+```
+
+Post‑hook:
+```bash
 pdf-squeeze --inplace --post-hook 'echo Processed: {} >> ~/squeeze.log' ~/Scans/file.pdf
+```
 
-# One-liner planning view (no changes)
+Dry‑run a tree (planning view):
+```bash
 pdf-squeeze --dry-run --recurse ~/Scans
 ```
 
@@ -226,104 +165,150 @@ pdf-squeeze --dry-run --recurse ~/Scans
   Use `--strip-metadata` for privacy-sensitive distributions.  
   `--keep-date` preserves access/modify times on output.
 
----
-
-## Exit status
+### Exit status
 
 - `0` success (including “skipped” files)
 - `1` no PDFs after filtering
 - `2` usage or unreadable input error
 - `127` missing dependency
 
----
-
-## Security
+### Security
 
 - If `--password`/`--password-file` is provided, decryption is to a **temporary file** only; the original is never modified in place.
 - No password caching, no external network calls.
 
----
+### Performance
 
-## Performance
-
-- The heavy work is in Ghostscript. Use `--jobs N` (with `parallel` installed) for multi-file workloads.
+- The heavy work is in Ghostscript. Use `--jobs N` for multi-file workloads.
 - SSD scratch space is used for temps; large scans may create sizeable intermediates.
 
 ---
 
 ## DEVONthink Integration
 
-	1.	**Compress Now** — a menu/toolbar action to compress the selected PDFs.
-	2.	**Smart Rule Handler** — a script for DEVONthink rules to compress PDFs that match conditions (e.g. added to a group, file size > X, etc).
+There are two AppleScripts:
+
+1. **Compress PDF Now** — a menu/toolbar action to compress the selected PDFs.
+2. **PDF Squeeze (Smart Rule)** — a handler for DEVONthink Smart Rules to compress PDFs that match conditions (e.g. added to a group, file size > X).
 
 ### Compile AppleScripts
 
 A) Using the command line
-
-```
+```bash
 # From the repo root
 osacompile -l AppleScript \
-  -o devonthink-scripts/compiled/CompressNow.scpt \
-  devonthink-scripts/src/CompressNow.applescript
+  -o devonthink-scripts/compiled/Compress\ PDF\ Now.scpt \
+  devonthink-scripts/src/Compress\ PDF\ Now.applescript
 
 osacompile -l AppleScript \
-  -o devonthink-scripts/compiled/SmartRule.scpt \
-  devonthink-scripts/src/SmartRule.applescript
+  -o devonthink-scripts/compiled/PDF\ Squeeze\ (Smart\ Rule).scpt \
+  devonthink-scripts/src/PDF\ Squeeze\ (Smart\ Rule).applescript
 ```
 
 B) Using the provided Makefile
-
-```
-# Compile both to devonthink-scripts/compiled/
+```bash
 make compile
 ```
 
-### DEVONthink 4
+### Install into DEVONthink
 
-Copy the compiled scripts into ~/Library/Application Scripts/com.devon-technologies.think
-
-```
+#### DEVONthink 4
+```bash
 mkdir -p ~/Library/Application\ Scripts/com.devon-technologies.think
 cp devonthink-scripts/compiled/*.scpt \
    ~/Library/Application\ Scripts/com.devon-technologies.think/
-
 # Or:
-make install-scripts DT_VER=4
-```   
-
-### DEVONthink 3
-
-Copy the compiled scripts into ~/Library/Application Scripts/com.devon-technologies.think3
-
+make install-dt DT_VER=4
 ```
+
+#### DEVONthink 3
+```bash
 mkdir -p ~/Library/Application\ Scripts/com.devon-technologies.think3
 cp devonthink-scripts/compiled/*.scpt \
    ~/Library/Application\ Scripts/com.devon-technologies.think3/
-
 # Or:
-make install-scripts DT_VER=3
+make install-dt DT_VER=3
 ```
 
 ### Using the scripts inside DEVONthink
 
-**Compress Now**
+**Compress PDF Now**
 - Open Preferences → Scripts and ensure the scripts folder is enabled.
 - Add the script to the Toolbar (View → Customize Toolbar) or run it from the Scripts menu.
 
 **Smart Rule Handler**
 - Create a Smart Rule (Tools → New Smart Rule…)
-- Choose your conditions (e.g. Kind is PDF, Size > 300 KB, etc.)
-- Perform the following actions → choose Run Script… and select SmartRule.scpt.
+- Choose conditions (e.g. Kind is PDF, Size > 300 KB, etc.)
+- Perform the following actions → choose Run Script… and select the compiled script.
 
 ### Suggested flags for DEVONthink
 
-| Mode     | Flags |
-|------------|--------------------------|
-| Safe default | `--inplace --min-gain 1` |
-| For tighter compression on scans | `-p standard --inplace --min-gain 3` |
-| For archival with stripped metadata | `-p archive --inplace --min-gain 1 --strip-metadata` |
+| Mode                          | Flags                                         |
+|-------------------------------|-----------------------------------------------|
+| Safe default                  | `--inplace --min-gain 1`                      |
+| Tighter compression on scans  | `-p standard --inplace --min-gain 3`          |
+| Archival w/ stripped metadata | `-p archive --inplace --min-gain 1 --strip-metadata` |
 
-Edit the header variables inside src/*.applescript to set your preferred defaults.
+Edit the header variables inside `devonthink-scripts/src/*.applescript` to set your preferred defaults.
+
+---
+
+## Development
+
+### Repo layout
+- `pdf-squeeze` — the zsh CLI
+- `tests/` — fixtures, helpers and the full test suite
+- `scripts/` — `lint.sh`, `format.sh`
+- `devonthink-scripts/` — optional AppleScripts and compiled `.scpt`
+
+### Running tests
+
+Smoke test (quick sanity):
+```bash
+make smoke
+```
+
+Full suite (rebuild fixtures, then run):
+```bash
+make test
+```
+
+The suite verifies:
+- All presets run and produce files
+- `--dry-run` estimate prints
+- `-o` is respected
+- `--inplace` preserves timestamps (with tolerance)
+- Filters (`--include/--exclude`), recurse, jobs
+- `--skip-if-smaller`
+- `--min-gain`
+- Encrypted PDFs: safe behavior without password, success with `--password`
+- Default naming rule
+- Deterministic size ordering (`extreme ≤ standard ≤ light` with tolerance)
+- CSV logging (when supported; test is conditional)
+
+Useful environment flags:
+- `PDF_SQUEEZE_SKIP_CLEAN=1 make test` — keep existing `tests/assets`/`tests/build`
+- `PDF_SQUEEZE_TEST_JOBS=8 make test` — cap/raise parallelism in test harness
+
+### Lint & formatting
+
+```bash
+make lint           # report only
+make lint VERBOSE=1 # show details
+make lint FIX=1     # apply shfmt & autofix minor issues
+```
+
+### Make targets
+
+```text
+install-bin   # copy ./pdf-squeeze → ~/bin/pdf-squeeze (override PREFIX=...)
+compile       # build AppleScripts → devonthink-scripts/compiled
+install-dt    # install compiled scripts into DEVONthink App Scripts folder
+install       # = install-bin + install-dt
+smoke         # quick CLI sanity
+test          # full suite
+clean         # remove build and generated assets
+```
 
 ---
 
@@ -334,34 +319,18 @@ Edit the header variables inside src/*.applescript to set your preferred default
 - **“SKIP (encrypted)”**  
   Supply a password: `--password '…'` or `--password-file path`.
 - **“SKIP (below …)”** or **“kept-original(below-threshold-or-larger)”**  
-  Either the output was not smaller, or it didn’t meet `--min-gain`. Lower `--min-gain`, or try `-p extreme` / `-q 72`.
-- **Tiny savings on vector-only PDFs**  
+  Either the output was not smaller, or it didn’t meet `--min-gain`. Lower `--min-gain`, or try `-p extreme`.
+- **Tiny savings on vector‑only PDFs**  
   Expected; there’s little to compress beyond structure.
 - **File looks slightly soft**  
-  Use `-p light`, or keep `standard` and raise `-q` (e.g., `-q 80`).  
-  For scan-heavy docs, `standard` generally preserves small text; `extreme` is for when size matters more.
-
-Run with `--debug` to see exactly what the tool intends (inputs, DPI choices, JPEG Q, estimated savings).
-
-### DEVONthink Troubleshooting
-
-Automation permissions
-The first run may prompt macOS to allow DEVONthink to run scripts and the script to run external tools.
-Allow when prompted:
-- System Settings → Privacy & Security → Automation (and optionally Full Disk Access).
-
-*Tool not found*
-If the AppleScript says it cannot find pdf-squeeze, ensure it’s installed in one of the searched paths or add its location to the script.
-
-*Smart Rule doesn’t fire*
-Check that:
-- Rule conditions are correct.
-- The Perform → Run Script points to the compiled .scpt in the right Application Scripts folder for your DEVONthink version.
-
-*No size savings*
-Some PDFs are mostly vector text or already optimized; try --debug or --dry-run to see the analysis.
+  Use `-p light`, or keep `standard` and raise quality (e.g., `-q 80`).
+- **“Missing: ghostscript / pdfcpu / qpdf”** — install via Homebrew.
+- **In‑place timestamp drift** — APFS granularity can cause small drift; the tool keeps it within ~2 minutes.
+- **CSV not found** — your build may not include `--csv` support; tests skip automatically when unavailable.
+- Run with `--debug` to see exactly what the tool intends (inputs, DPI choices, JPEG Q, estimated savings).
 
 ---
+
 ## Uninstall / Update
 
 Just remove or replace the single script:
@@ -373,13 +342,19 @@ rm -f ~/bin/pdf-squeeze
 
 ---
 
-### Changelog (abridged)
+## Changelog (abridged)
 
-- **2.2.0-zsh**  
-  - zsh-native; fixed subshell array bug; robust argv hand-off  
-  - BSD-awk compatible image analyser (header-driven; correct x/y-ppi)  
+- **2.2.0‑zsh**  
+  - zsh‑native; fixed subshell array bug; robust argv hand‑off  
+  - BSD‑awk compatible image analyser (header‑driven; correct x/y‑ppi)  
   - `--dry-run` prints preset, estimated savings %, and size range  
-  - Safer decryption: no `qpdf --replace-input`  
-  - zsh-correct cleanup: `setopt localtraps; trap … EXIT`  
+  - Safer decryption; no `qpdf --replace-input`  
+  - zsh‑correct cleanup: `setopt localtraps; trap … EXIT`  
   - Filtering supports `--include`/`--exclude` (regex)  
   - Deterministic by default; metadata & dates kept by default
+
+---
+
+## License
+
+MIT © 2025 Geraint Preston

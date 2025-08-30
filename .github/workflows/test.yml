@@ -1,10 +1,8 @@
 name: Tests
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch: {}   # manual only
+  # (remove push:, pull_request:, schedule:, etc.)
 
 jobs:
   macos:

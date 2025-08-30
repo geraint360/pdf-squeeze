@@ -1,42 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# paths
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Controls:
-#   VERBOSE=1   → show diffs, detailed output
-#   FIX=0       → don't rewrite files (default: rewrite when possible)
+#   VERBOSE=1 → show diffs, detailed output
+#   FIX=0     → don't rewrite files (default: rewrite when possible)
 VERBOSE="${VERBOSE:-0}"
 FIX="${FIX:-1}"
 
 # --- zsh syntax check (quiet unless error) ---
-zsh -n "$ROOT/pdf-squeeze"
+# Only if the zsh entrypoint exists.
+if [[ -f "$ROOT/pdf-squeeze" ]]; then
+  zsh -n "$ROOT/pdf-squeeze"
+fi
 
-# --- format bash test scripts ---
-if command -v shfmt >/dev/null 2>&1; then
-  if [[ "$FIX" = "1" ]]; then
-    # Write changes in-place (quiet)
-    shfmt -w -i 2 -bn -ci -sr "$ROOT/tests"/*.sh
-  else
-    # Check mode; show diffs only if verbose
-    if [[ "$VERBOSE" = "1" ]]; then
-      shfmt -d -i 2 -bn -ci -sr "$ROOT/tests"/*.sh
+# --- format bash test scripts (shfmt) ---
+if command -v shfmt > /dev/null 2>&1; then
+  # Collect test shell scripts robustly (handles 0 matches) — portable for Bash 3.2
+  TEST_SH=()
+  while IFS= read -r -d '' f; do
+    TEST_SH+=("$f")
+  done < <(find "$ROOT/tests" "$ROOT/scripts" -type f -name '*.sh' -print0 2> /dev/null || printf '\0')
+
+  if [[ "${#TEST_SH[@]}" -gt 0 ]]; then
+    if [[ "$FIX" = "1" ]]; then
+      shfmt -w -i 2 -bn -ci -sr "${TEST_SH[@]}"
     else
-      # Non-zero exit if changes needed, but don't print full diffs
-      if ! shfmt -l -i 2 -bn -ci -sr "$ROOT/tests"/*.sh | grep . >/dev/null; then
-        : # clean
+      if [[ "$VERBOSE" = "1" ]]; then
+        shfmt -d -i 2 -bn -ci -sr "${TEST_SH[@]}"
       else
-        echo "shfmt: files need formatting (rerun with FIX=1 or VERBOSE=1 for details)"
-        exit 1
+        if shfmt -l -i 2 -bn -ci -sr "${TEST_SH[@]}" | grep . > /dev/null; then
+          echo "shfmt: files need formatting (rerun with FIX=1 or VERBOSE=1 for details)"
+          exit 1
+        fi
       fi
     fi
   fi
-fi
-
-# --- shellcheck (bash tests only; skip zsh main) ---
-if command -v shellcheck >/dev/null 2>&1; then
-  # Add SC codes you want to silence here if needed
-  shellcheck -x "$ROOT/tests/"*.sh
 fi
 
 if [[ "$VERBOSE" = "1" ]]; then

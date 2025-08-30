@@ -11,6 +11,9 @@ SHELL := /bin/bash
 REPO_ROOT      := $(CURDIR)
 SRC_DIR        := devonthink-scripts/src
 COMPILED_DIR   := devonthink-scripts/compiled
+ASSETS_DIR     := tests/assets
+SMOKE_DIR      := tests/assets-smoke
+BUILD_DIR      := tests/build
 
 # DEVONthink version: 4 (default) or 3
 DT_VER ?= 4
@@ -78,17 +81,6 @@ install-dt: compile
 	done < <(find "$(COMPILED_DIR)" -type f -name '*.scpt' -print0); \
 	echo "Installed to: $(DT_SCRIPTS_DIR)"
 
-clean:
-	@rm -rf "$(COMPILED_DIR)"
-	@echo "Removed $(COMPILED_DIR)"
-
-test:
-	@chmod +x tests/*.sh
-	@tests/run.sh
-
-test-clean:
-	@rm -rf tests/build tests/assets
-
 # Install pdf-squeeze into ~/bin (create if missing)
 install-bin:
 	@mkdir -p "$(BIN_DIR)"
@@ -96,11 +88,29 @@ install-bin:
 	@echo "Installed to $(BIN_DIR)/pdf-squeeze"
 	@case ":$(PATH):" in *:"$(BIN_DIR)":*) ;; *) echo 'NOTE: add $(BIN_DIR) to your PATH';; esac
 
+clean:
+	@rm -rf "$(COMPILED_DIR)" "$(ASSETS_DIR)" "$(SMOKE_DIR)"
+	@echo "Removed $(COMPILED_DIR) $(ASSETS_DIR) $(SMOKE_DIR)"
+
+test-clean:
+	rm -rf "$(BUILD_DIR)" "$(ASSETS_DIR)" "$(SMOKE_DIR)"
+	mkdir -p "$(BUILD_DIR)" "$(ASSETS_DIR)"
+	
+# Run the full test suite from a clean slate
+test: test-clean
+	@echo "🔄 Rebuilding fixtures..."
+	@tests/fixtures.sh
+	@echo "✅ Fixtures ready."
+	@echo "🚀 Running full test suite..."
+	@tests/run.sh
+	
+# Run only the smoke tests (lightweight)
+smoke: test-clean
+	@echo "🔄 Preparing smoke test environment..."
+	@tests/smoke.sh
+
 lint:
 	@VERBOSE=$(VERBOSE) FIX=$(FIX) bash scripts/lint.sh
-
-smoke:
-	@tests/smoke.sh
 
 fmt:
 	@scripts/format.sh
