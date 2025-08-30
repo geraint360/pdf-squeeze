@@ -30,8 +30,10 @@ $(error DT_VER must be 3 or 4)
 endif
 
 DT_SCRIPTS_DIR := $(HOME)/Library/Application Scripts/$(DT_BUNDLE)
+DT_MENU    := $(DT_SCRIPTS_DIR)/Menu
+DT_RULES   := $(DT_SCRIPTS_DIR)/Smart Rules
 
-.PHONY: compile clean show-paths test test-clean install-bin install-dt install lint smoke fmt
+.PHONY: compile clean show-paths test test-clean install-bin install-dt uninstall-dt install lint smoke smoke-clean fmt
 
 .DEFAULT_GOAL := help
 
@@ -73,13 +75,24 @@ compile:
 	fi
 
 install-dt: compile
-	@set -euo pipefail; \
-	mkdir -p "$(DT_SCRIPTS_DIR)"; \
-	while IFS= read -r -d '' f; do \
-	  echo "Installing: $$f -> $(DT_SCRIPTS_DIR)/$${f##*/}"; \
-	  cp -f "$$f" "$(DT_SCRIPTS_DIR)/"; \
-	done < <(find "$(COMPILED_DIR)" -type f -name '*.scpt' -print0); \
-	echo "Installed to: $(DT_SCRIPTS_DIR)"
+	@mkdir -p "$(DT_MENU)" "$(DT_RULES)"
+	@echo "Installing scripts:"
+	@if [ -f "$(COMPILED_DIR)/Compress PDF Now.scpt" ]; then \
+		cp -f "$(COMPILED_DIR)/Compress PDF Now.scpt" "$(DT_MENU)/"; \
+		echo "  ✓ Compress PDF Now.scpt → Menu"; \
+	fi
+	@if [ -f "$(COMPILED_DIR)/PDF Squeeze (Smart Rule).scpt" ]; then \
+		cp -f "$(COMPILED_DIR)/PDF Squeeze (Smart Rule).scpt" "$(DT_RULES)/"; \
+		echo "  ✓ PDF Squeeze (Smart Rule).scpt → Smart Rules"; \
+	fi
+	@echo "Done: installed to DEVONthink scripts folders."
+
+uninstall-dt:
+	@rm -f "$(DT_MENU_DIR)/Compress PDF Now.scpt" \
+	       "$(DT_SMART_DIR)/PDF Squeeze (Smart Rule).scpt" || true
+	@echo "Removed DT scripts from:"
+	@echo "  • $(DT_MENU_DIR)"
+	@echo "  • $(DT_SMART_DIR)"
 
 # Install pdf-squeeze into ~/bin (create if missing)
 install-bin:
@@ -89,13 +102,13 @@ install-bin:
 	@case ":$(PATH):" in *:"$(BIN_DIR)":*) ;; *) echo 'NOTE: add $(BIN_DIR) to your PATH';; esac
 
 clean:
-	@rm -rf "$(COMPILED_DIR)" "$(ASSETS_DIR)" "$(SMOKE_DIR)"
-	@echo "Removed $(COMPILED_DIR) $(ASSETS_DIR) $(SMOKE_DIR)"
-
-test-clean:
-	rm -rf "$(BUILD_DIR)" "$(ASSETS_DIR)" "$(SMOKE_DIR)"
-	mkdir -p "$(BUILD_DIR)" "$(ASSETS_DIR)"
+	@rm -rf "$(COMPILED_DIR)" "$(ASSETS_DIR)" "$(SMOKE_DIR)" "$(BUILD_DIR)"
+	@echo "Removed compiled scripts, test assets, smoke assets, and build output."
 	
+test-clean: clean
+	@mkdir -p "$(BUILD_DIR)" "$(ASSETS_DIR)"
+	@echo "Test environment reset: rebuilt $(BUILD_DIR) and $(ASSETS_DIR)."
+		
 # Run the full test suite from a clean slate
 test: test-clean
 	@echo "🔄 Rebuilding fixtures..."
@@ -104,8 +117,13 @@ test: test-clean
 	@echo "🚀 Running full test suite..."
 	@tests/run.sh
 	
+smoke-clean:
+	@rm -rf "$(SMOKE_DIR)"
+	@mkdir -p "$(SMOKE_DIR)"
+	@echo "Removed and recreated $(SMOKE_DIR)"
+	
 # Run only the smoke tests (lightweight)
-smoke: test-clean
+smoke: smoke-clean
 	@echo "🔄 Preparing smoke test environment..."
 	@tests/smoke.sh
 
