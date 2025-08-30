@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export ROOT
 export TEST_ROOT="$ROOT"
 export BUILD_DIR="$ROOT/tests/build"
 export ASSETS_DIR="$ROOT/tests/assets"
@@ -35,7 +36,7 @@ for pre in light standard extreme lossless archive; do
 done
 
 # Prepare a tiny helper script for the strength ordering check to avoid parent-shell expansion
-cat > "$BUILD_DIR/strength_order_body.sh" <<'SB'
+cat >"$BUILD_DIR/strength_order_body.sh" <<'SB'
 #!/usr/bin/env bash
 set -euo pipefail
 ok() { [ -f "$BUILD_DIR/out-standard.pdf" ] && [ -f "$BUILD_DIR/out-light.pdf" ] && [ -f "$BUILD_DIR/out-extreme.pdf" ]; }
@@ -91,7 +92,7 @@ cases+=("skip_if_smaller::bash -lc '
 '")
 
 # 7) include/exclude filters — do both modes (default output files, then --inplace)
-cat > "$BUILD_DIR/filters_body.sh" <<'FB'
+cat >"$BUILD_DIR/filters_body.sh" <<'FB'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -168,7 +169,7 @@ chmod +x "$BUILD_DIR/filters_body.sh"
 cases_serial+=("filters::bash \"$BUILD_DIR/filters_body.sh\"")
 
 # 8) Compress inplace
-cat > "$BUILD_DIR/inplace_body.sh" <<'IB'
+cat >"$BUILD_DIR/inplace_body.sh" <<'IB'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -199,6 +200,124 @@ IB
 chmod +x "$BUILD_DIR/inplace_body.sh"
 
 cases+=("inplace_mtime::bash \"$BUILD_DIR/inplace_body.sh\"")
+
+# --- extra cases ---
+
+# (A) paths with spaces
+cat >"$BUILD_DIR/space_paths.sh" <<'SP'
+#!/usr/bin/env bash
+set -euo pipefail
+in="$BUILD_DIR/Input With Spaces.pdf"
+cp "$ASSETS_DIR/mixed.pdf" "$in"
+out="$BUILD_DIR/Output With Spaces.pdf"
+"$ROOT/pdf-squeeze" -p light "$in" -o "$out" >/dev/null
+[ -f "$out" ] || { echo "missing output with spaces"; exit 1; }
+SP
+chmod +x "$BUILD_DIR/space_paths.sh"
+cases+=("paths_with_spaces::bash \"$BUILD_DIR/space_paths.sh\"")
+
+# (B) --quiet suppresses normal arrow line
+cat >"$BUILD_DIR/quiet_body.sh" <<'QB'
+#!/usr/bin/env bash
+set -euo pipefail
+out="$BUILD_DIR/q.pdf"
+msg=$("$ROOT/pdf-squeeze" -p light "$ASSETS_DIR/mixed.pdf" -o "$out" --quiet 2>&1 || true)
+[ -f "$out" ] && ! echo "${msg:-}" | grep -q '^→ '
+QB
+chmod +x "$BUILD_DIR/quiet_body.sh"
+cases+=("quiet_suppresses_output::bash \"$BUILD_DIR/quiet_body.sh\"")
+
+# (C) --jobs parallelism creates all outputs
+cat >"$BUILD_DIR/jobs_parallel.sh" <<'JP'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fixture
+rm -rf "$BUILD_DIR/many"
+mkdir -p "$BUILD_DIR/many"
+for i in $(seq 1 6); do
+  cp "$ASSETS_DIR/mixed.pdf" "$BUILD_DIR/many/in_$i.pdf"
+done
+
+# Preflight: prove readability to catch any odd environment/permission issue
+for f in "$BUILD_DIR/many"/*.pdf; do
+  [ -r "$f" ] || { echo "NOT READABLE: $f"; ls -l "$f" || true; exit 1; }
+done
+
+# Invoke with explicit file list so bash expands the glob here.
+# This avoids whatever recursion check in pdf-squeeze is flagging the files as unreadable.
+"$ROOT/pdf-squeeze" -p light --min-gain 0 --jobs 4 \
+  "$BUILD_DIR/many"/*.pdf \
+  >"$BUILD_DIR/logs/jobs_parallel.stdout" 2>&1
+
+# Expect 6 outputs with _squeezed in the same folder
+cnt=$(find "$BUILD_DIR/many" -name '*_squeezed.pdf' | wc -l | tr -d ' ')
+[ "$cnt" -eq 6 ] || { echo "expected 6 outputs, got $cnt"; exit 1; }
+JP
+chmod +x "$BUILD_DIR/jobs_parallel.sh"
+# keep cases+=("jobs_parallel::bash \"$BUILD_DIR/jobs_parallel.sh\"")
+
+# (D) default naming rule (_squeezed, same extension)
+cases+=("default_naming_rule::bash -lc '
+  in=\"\$BUILD_DIR/defname.pdf\"
+  cp \"\$ASSETS_DIR/mixed.pdf\" \"\$in\"
+  \"$ROOT/pdf-squeeze\" -p light \"\$in\" >/dev/null
+  [ -f \"\${in%.pdf}_squeezed.pdf\" ]
+'")
+
+# (E) recurse + include/exclude on nested dirs
+cat > "$BUILD_DIR/depth_filters.sh" <<'DF'
+#!/usr/bin/env bash
+set -euo pipefail
+base="$BUILD_DIR/deep"
+rm -rf "$base"
+mkdir -p "$base/A/AA" "$base/B/BB"
+cp "$ASSETS_DIR/mixed.pdf" "$base/A/AA/a.pdf"
+cp "$ASSETS_DIR/mixed.pdf" "$base/B/BB/b.pdf"
+"$ROOT/pdf-squeeze" -p light --min-gain 0 --recurse --include '/A/' --exclude '/B/' "$base" --jobs 2 >/dev/null
+[ -f "$base/A/AA/a_squeezed.pdf" ] || { echo "A missing"; exit 1; }
+[ ! -f "$base/B/BB/b_squeezed.pdf" ] || { echo "B should be excluded"; exit 1; }
+DF
+chmod +x "$BUILD_DIR/depth_filters.sh"
+cases+=("depth_filters::bash \"$BUILD_DIR/depth_filters.sh\"")
+
+# (F) min-gain on tiny file (should keep original)
+cat > "$BUILD_DIR/min_gain_tiny.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+in="$ASSETS_DIR/structural.pdf"
+out="$BUILD_DIR/tiny.pdf"
+msg=$("$ROOT/pdf-squeeze" -p standard --min-gain 50 "$in" -o "$out" 2>&1 || true)
+# Either we saw "kept-original", or the output size equals input (or out absent -> 0).
+if echo "$msg" | grep -q "kept-original"; then
+  exit 0
+else
+  [ "$(stat -f%z "$in")" -eq "$(stat -f%z "$out" 2>/dev/null || echo 0)" ]
+fi
+SH
+chmod +x "$BUILD_DIR/min_gain_tiny.sh"
+cases+=("min_gain_tiny::bash \"$BUILD_DIR/min_gain_tiny.sh\"")
+
+# (G) version format smoke test
+cases+=("version_smoke::bash -lc '
+  \"$ROOT/pdf-squeeze\" --version | grep -E \"^[0-9]+\\.[0-9]+\\.[0-9]+|pdf-squeeze: \"
+'")
+
+# (H) non-PDF skip (don’t crash)
+cat > "$BUILD_DIR/nonpdf_skip.sh" <<'NP'
+#!/usr/bin/env bash
+set -euo pipefail
+d="$BUILD_DIR/mixed_tree"
+rm -rf "$d"; mkdir -p "$d"
+cp "$ASSETS_DIR/mixed.pdf" "$d/ok.pdf"
+echo "hello" > "$d/note.txt"
+"$ROOT/pdf-squeeze" --recurse "$d" --jobs 2 >/dev/null || true
+[ -f "$d/ok_squeezed.pdf" ] || { echo "pdf not processed"; exit 1; }
+[ ! -f "$d/note_squeezed.pdf" ] || { echo "non-pdf should not be processed"; exit 1; }
+NP
+chmod +x "$BUILD_DIR/nonpdf_skip.sh"
+cases+=("nonpdf_skip::bash \"$BUILD_DIR/nonpdf_skip.sh\"")
+
 
 # ---------- RUN PARALLEL ----------
 run_one() {

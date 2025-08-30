@@ -28,6 +28,17 @@ jobs:
           brew install ghostscript parallel pdfcpu
           pdfcpu version
 
+      - name: Install linters (macOS)
+        run: |
+          set -euxo pipefail
+          brew install shellcheck shfmt || true
+
+      - name: Lint
+        run: make lint
+
+      - name: Smoke
+        run: make smoke
+
       - name: Make script executable
         run: chmod +x pdf-squeeze
 
@@ -49,19 +60,36 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies (Linux)
+        env:
+          PDFCPU_VER: v0.7.1
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y ghostscript parallel curl tar
-          # Install pdfcpu (latest)
-          PDFCPU_URL=$(curl -s https://api.github.com/repos/pdfcpu/pdfcpu/releases/latest \
-            | grep browser_download_url | grep linux | grep x86_64 | cut -d '"' -f 4 | head -n1)
-          curl -L "$PDFCPU_URL" -o pdfcpu.tar.gz
-          tar -xzf pdfcpu.tar.gz
+          # Install pdfcpu (pinned version; avoids GitHub API rate limits)
+          url="https://github.com/pdfcpu/pdfcpu/releases/download/${PDFCPU_VER}/pdfcpu_${PDFCPU_VER#v}_Linux_x86_64.tar.gz"
+          curl -L "$url" -o pdfcpu.tgz
+          tar -xzf pdfcpu.tgz
           sudo mv pdfcpu*/pdfcpu /usr/local/bin/pdfcpu
           pdfcpu version
 
       - name: Make script executable
         run: chmod +x pdf-squeeze
+
+      - name: Install linters (Linux)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          # shfmt (golang based)
+          curl -sSLo /usr/local/bin/shfmt https://github.com/mvdan/sh/releases/download/v3.8.0/shfmt_v3.8.0_linux_amd64
+          sudo chmod +x /usr/local/bin/shfmt
+
+      - name: Lint
+        run: make lint
+
+      - name: Smoke
+        run: make smoke
 
       - name: Run tests
         env:
@@ -74,3 +102,4 @@ jobs:
         with:
           name: test-logs-linux
           path: tests/build/logs
+

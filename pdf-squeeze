@@ -229,7 +229,7 @@ filter_files() {
   print -r -- "${keep[@]}" 2>/dev/null || true
 }
 if ! $INTERNAL_ONE; then
-  FILES=("${(@f)$(filter_files "${FILES[@]}")}")
+  FILES=("${(f)$(filter_files "${FILES[@]}")}")
   [[ ${#FILES[@]} -ge 1 ]] || { echo "No PDFs after filtering."; exit 1; }
 fi
 
@@ -598,7 +598,9 @@ process_one() {
   if $SIDECAR; then sha_sidecar pre "$orig" || true; sha_sidecar post "$OUT" || true; fi
   if [[ -n "$POST_HOOK" ]]; then
     IN="$orig"; OUT="$OUT"; ORIG_BYTES="$ORIG_BYTES"; OUT_BYTES="$OUT_BYTES"; PRESET="$PRE"; SAVEPCT="$SAVEPCT"
-    env IN="$IN" OUT="$OUT" ORIG_BYTES="$ORIG_BYTES" OUT_BYTES="$OUT_BYTES" PRESET="$PRESET" SAVEPCT="$SAVEPCT" /bin/zsh -lc "${POST_HOOK//\{\}/\"$OUT\"}" || true
+		cmd=${POST_HOOK//\{\}/${(q)OUT}}   # replace {} with a safely-quoted $OUT
+		env IN="$IN" OUT="$OUT" ORIG_BYTES="$ORIG_BYTES" OUT_BYTES="$OUT_BYTES" PRESET="$PRESET" SAVEPCT="$SAVEPCT" \
+  /bin/zsh -lc -- "$cmd" || true
   fi
   if [[ -n "$LOGFILE" ]]; then
     local ratio; ratio=$(awk -v a="$OUT_BYTES" -v b="$ORIG_BYTES" 'BEGIN{printf "%.4f",(b>0)?a/b:1}')
