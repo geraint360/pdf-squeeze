@@ -1,16 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; RST=$'\e[0m'
+RED=$'\e[31m'
+GRN=$'\e[32m'
+YLW=$'\e[33m'
+RST=$'\e[0m'
 
 pass() { printf "%s✓%s %s\n" "$GRN" "$RST" "$*"; }
-fail() { printf "%s✗%s %s\n" "$RED" "$RST" "$*" >&2; exit 1; }
+fail() {
+  printf "%s✗%s %s\n" "$RED" "$RST" "$*" >&2
+  exit 1
+}
 
 # assert file exists
-assert_file() { [[ -f "$1" ]] || fail "Expected file not found: $1"; pass "File exists: $1"; }
+assert_file() {
+  [[ -f "$1" ]] || fail "Expected file not found: $1"
+  pass "File exists: $1"
+}
 
 # assert substring in output
-assert_in() { printf "%s" "$1" | grep -q -- "$2" || fail "Expected to find '$2' in output"; pass "Saw '$2' in output"; }
+assert_in() {
+  printf "%s" "$1" | grep -q -- "$2" || fail "Expected to find '$2' in output"
+  pass "Saw '$2' in output"
+}
 
 # assert bytes(a) < bytes(b) * (1 - min_saving)
 # usage: assert_smaller OUT IN 0.10   # at least 10% smaller

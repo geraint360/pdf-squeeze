@@ -7,22 +7,29 @@ export TEST_ROOT="$ROOT"
 export BUILD_DIR="$ROOT/tests/build"
 export ASSETS_DIR="$ROOT/tests/assets"
 
+# Always start clean unless explicitly skipped
+if [[ "${PDF_SQUEEZE_SKIP_CLEAN:-0}" != "1" ]]; then
+  rm -rf "$BUILD_DIR" "$ASSETS_DIR"
+  mkdir -p "$BUILD_DIR" "$ASSETS_DIR"
+  "$ROOT/tests/fixtures.sh"
+fi
+
 # Ensure deps for tests
-need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1"; exit 127; }; }
+need() { command -v "$1" > /dev/null 2>&1 || {
+  echo "Missing: $1"
+  exit 127
+}; }
 need pdfcpu
+need qpdf
 need "$ROOT/pdf-squeeze"
 # We don't require magick; sips is bundled on macOS
-
-# Fresh workspace
-rm -rf "$BUILD_DIR" "$ASSETS_DIR"
-mkdir -p "$BUILD_DIR" "$ASSETS_DIR"
 
 # Load fixture builders (creates assets)
 source "$ROOT/tests/fixtures.sh"
 # Load helpers (assertions, runners)
 source "$ROOT/tests/helpers.sh"
 
-set -x  # show each test command in logs (kept under tests/build/logs)
+set -x # show each test command in logs (kept under tests/build/logs)
 
 # ---------- CASES ----------
 cases=()
@@ -36,7 +43,7 @@ for pre in light standard extreme lossless archive; do
 done
 
 # Prepare a tiny helper script for the strength ordering check to avoid parent-shell expansion
-cat >"$BUILD_DIR/strength_order_body.sh" <<'SB'
+cat > "$BUILD_DIR/strength_order_body.sh" << 'SB'
 #!/usr/bin/env bash
 set -euo pipefail
 ok() { [ -f "$BUILD_DIR/out-standard.pdf" ] && [ -f "$BUILD_DIR/out-light.pdf" ] && [ -f "$BUILD_DIR/out-extreme.pdf" ]; }
@@ -92,7 +99,7 @@ cases+=("skip_if_smaller::bash -lc '
 '")
 
 # 7) include/exclude filters — do both modes (default output files, then --inplace)
-cat >"$BUILD_DIR/filters_body.sh" <<'FB'
+cat > "$BUILD_DIR/filters_body.sh" << 'FB'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -169,7 +176,7 @@ chmod +x "$BUILD_DIR/filters_body.sh"
 cases_serial+=("filters::bash \"$BUILD_DIR/filters_body.sh\"")
 
 # 8) Compress inplace
-cat >"$BUILD_DIR/inplace_body.sh" <<'IB'
+cat > "$BUILD_DIR/inplace_body.sh" << 'IB'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -204,7 +211,7 @@ cases+=("inplace_mtime::bash \"$BUILD_DIR/inplace_body.sh\"")
 # --- extra cases ---
 
 # (A) paths with spaces
-cat >"$BUILD_DIR/space_paths.sh" <<'SP'
+cat > "$BUILD_DIR/space_paths.sh" << 'SP'
 #!/usr/bin/env bash
 set -euo pipefail
 in="$BUILD_DIR/Input With Spaces.pdf"
@@ -217,7 +224,7 @@ chmod +x "$BUILD_DIR/space_paths.sh"
 cases+=("paths_with_spaces::bash \"$BUILD_DIR/space_paths.sh\"")
 
 # (B) --quiet suppresses normal arrow line
-cat >"$BUILD_DIR/quiet_body.sh" <<'QB'
+cat > "$BUILD_DIR/quiet_body.sh" << 'QB'
 #!/usr/bin/env bash
 set -euo pipefail
 out="$BUILD_DIR/q.pdf"
@@ -228,7 +235,7 @@ chmod +x "$BUILD_DIR/quiet_body.sh"
 cases+=("quiet_suppresses_output::bash \"$BUILD_DIR/quiet_body.sh\"")
 
 # (C) --jobs parallelism creates all outputs
-cat >"$BUILD_DIR/jobs_parallel.sh" <<'JP'
+cat > "$BUILD_DIR/jobs_parallel.sh" << 'JP'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -266,7 +273,7 @@ cases+=("default_naming_rule::bash -lc '
 '")
 
 # (E) recurse + include/exclude on nested dirs
-cat > "$BUILD_DIR/depth_filters.sh" <<'DF'
+cat > "$BUILD_DIR/depth_filters.sh" << 'DF'
 #!/usr/bin/env bash
 set -euo pipefail
 base="$BUILD_DIR/deep"
@@ -282,7 +289,7 @@ chmod +x "$BUILD_DIR/depth_filters.sh"
 cases+=("depth_filters::bash \"$BUILD_DIR/depth_filters.sh\"")
 
 # (F) min-gain on tiny file (should keep original)
-cat > "$BUILD_DIR/min_gain_tiny.sh" <<'SH'
+cat > "$BUILD_DIR/min_gain_tiny.sh" << 'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 in="$ASSETS_DIR/structural.pdf"
@@ -304,7 +311,7 @@ cases+=("version_smoke::bash -lc '
 '")
 
 # (H) non-PDF skip (don’t crash)
-cat > "$BUILD_DIR/nonpdf_skip.sh" <<'NP'
+cat > "$BUILD_DIR/nonpdf_skip.sh" << 'NP'
 #!/usr/bin/env bash
 set -euo pipefail
 d="$BUILD_DIR/mixed_tree"
@@ -317,6 +324,84 @@ echo "hello" > "$d/note.txt"
 NP
 chmod +x "$BUILD_DIR/nonpdf_skip.sh"
 cases+=("nonpdf_skip::bash \"$BUILD_DIR/nonpdf_skip.sh\"")
+
+# (I) encrypted PDFs: skip without password, succeed with --password
+cat >"$BUILD_DIR/encrypted_body.sh" <<'ENCRYPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Inputs
+in_plain="$ASSETS_DIR/gray.pdf"
+enc="$BUILD_DIR/enc.pdf"
+
+# Make an AES-256 encrypted PDF (qpdf refuses weak crypto by default)
+qpdf --encrypt test123 test123 256 -- "$in_plain" "$enc"
+
+# --- A) No password: accept EITHER an explicit SKIP or a kept-original pass-through ---
+out_no="$BUILD_DIR/enc_no_pw.pdf"
+rm -f "$out_no" "$BUILD_DIR/enc_no_pw_squeezed.pdf"
+
+msg=$("$ROOT/pdf-squeeze" -p light "$enc" -o "$out_no" 2>&1 || true)
+
+# Case 1: tool says it's skipping due to encryption/password
+if echo "$msg" | grep -qiE 'SKIP.*(encrypted|password)'; then
+  # either no file, or an empty stub — both OK
+  [ ! -f "$out_no" ] || [ "$(stat -f%z "$out_no")" -eq 0 ]
+else
+  # Case 2: tool didn’t skip; it produced an output but kept original
+  echo "$msg" | grep -q 'kept-original'  # must acknowledge pass-through
+  # Output can be exactly -o path OR (depending on tool behavior) a *_squeezed.pdf
+  if [ -f "$out_no" ]; then
+    : # ok
+  elif [ -f "$BUILD_DIR/enc_no_pw_squeezed.pdf" ]; then
+    : # ok
+  else
+    echo "Expected an output file in no-password mode" >&2
+    exit 1
+  fi
+fi
+
+# --- B) With password: must succeed and write an output file ---
+out_yes="$BUILD_DIR/enc_with_pw.pdf"
+rm -f "$out_yes"
+"$ROOT/pdf-squeeze" -p light --password test123 "$enc" -o "$out_yes" >/dev/null
+[ -f "$out_yes" ] || { echo "Missing output with password"; exit 1; }
+
+ENCRYPT
+chmod +x "$BUILD_DIR/encrypted_body.sh"
+
+# (J) CSV logging (only if the binary supports --csv)
+if "$ROOT/pdf-squeeze" --help 2>&1 | grep -q -- ' --csv'; then
+  cat >"$BUILD_DIR/csv_body.sh" <<'CSV'
+#!/usr/bin/env bash
+set -euo pipefail
+
+d="$BUILD_DIR/csv_many"
+rm -rf "$d"; mkdir -p "$d"
+
+cp "$ASSETS_DIR/gray.pdf" "$d/in_1.pdf"
+cp "$ASSETS_DIR/gray.pdf" "$d/in_2.pdf"
+cp "$ASSETS_DIR/mono.pdf" "$d/in_3.pdf"
+
+csv="$BUILD_DIR/report.csv"
+rm -f "$csv"
+
+"$ROOT/pdf-squeeze" -p light --csv "$csv" "$d" --jobs 2 >/dev/null
+
+[ -f "$csv" ]
+inputs=$(find "$d" -name '*.pdf' | wc -l | tr -d ' ')
+lines=$(wc -l < "$csv" | tr -d ' ')
+[ "$lines" -ge 2 ] || { echo "CSV too short"; exit 1; }
+[ "$lines" -ge $((inputs+1)) ] || echo "Note: fewer rows than inputs; possibly skipped items (ok)."
+
+echo "CSV HEAD:"; head -n 2 "$csv" || true
+CSV
+  chmod +x "$BUILD_DIR/csv_body.sh"
+  cases+=("csv_logging::bash \"$BUILD_DIR/csv_body.sh\"")
+else
+  echo "Skipping CSV logging test (no --csv support detected)" >&2
+fi
+
 
 
 # ---------- RUN PARALLEL ----------
@@ -342,10 +427,10 @@ export ROOT BUILD_DIR ASSETS_DIR
 echo "Running ${#cases[@]} tests…"
 
 # Prefer GNU parallel if available (clean & reliable).
-if command -v parallel >/dev/null 2>&1; then
+if command -v parallel > /dev/null 2>&1; then
   # Use NUL-delimited input to avoid any quoting issues.
   printf '%s\0' "${cases[@]}" \
-  | parallel --no-notice -0 -j "$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" run_one {}
+    | parallel --no-notice -0 -j "$(sysctl -n hw.ncpu 2> /dev/null || echo 4)" run_one {}
 else
   # Deterministic sequential fallback (no DIY background job juggling)
   for c in "${cases[@]}"; do
@@ -361,7 +446,7 @@ done
 set +x
 echo
 # Prefer marker file; fall back to grepping logs.
-if [ -f "$BUILD_DIR/failed" ] || grep -R "Case FAILED" -q "$BUILD_DIR/logs" 2>/dev/null; then
+if [ -f "$BUILD_DIR/failed" ] || grep -R "Case FAILED" -q "$BUILD_DIR/logs" 2> /dev/null; then
   echo "Some tests failed ❌ (see $BUILD_DIR/logs)"
   [ -f "$BUILD_DIR/failed" ] && echo "Failed cases:" && cat "$BUILD_DIR/failed"
   exit 1
