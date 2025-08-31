@@ -1,8 +1,8 @@
 # pdf-squeeze
 
-A fast PDF size reducer for macOS. Targets material file‑size savings while keeping documents readable and searchable. Ships as a single script (`pdf-squeeze`, uses **zsh**) with pragmatic defaults and safety rails.
+A fast, pragmatic PDF size reducer for **macOS and Linux**. `pdf-squeeze` targets **meaningful size savings** while keeping documents **readable, searchable, and printable**. It ships as a **single zsh script** with sensible defaults, guard-rails, and excellent batch support.
 
-> Typical savings for mixed documents are 20–70% depending on content and preset. See **Presets** and examples below.
+> Typical savings on mixed documents are **20–70%**, depending on content and preset. See **Presets** and **Examples** below.
 
 ---
 
@@ -13,48 +13,70 @@ A fast PDF size reducer for macOS. Targets material file‑size savings while ke
 - Batch processing (files or folders), recursion, include/exclude filters, and parallel jobs
 - Dry‑run estimator with projected size and savings (no writes)
 - Skip rules to avoid work on tiny files or when savings would be negligible
-- Timestamp‑friendly: preserves mtime for in‑place operations (APFS granularity tolerated)
+- Timestamp‑friendly: preserves file date and time for in‑place operations (APFS granularity tolerated)
 - Optional password handling for encrypted PDFs (`--password`); otherwise it will **skip or pass‑through** safely
 - Deterministic behavior and stable output naming (`*_squeezed.pdf`), unless `-o`/`--inplace` is used
 - Integrations with DEVONthink 3 and 4
-
-
----
-
-## Requirements
-
-macOS (tested on Sonoma) with the following tools installed:
-
-- Ghostscript (`gs`)
-- pdfcpu
-- qpdf (for encrypted‑PDF handling and tests)
-- exiftool
-- poppler
-- coreutils
-- mupdf-tools (will use mupdf if already installed)
-- parallel (optional)
-
-The quick installer will automatically install Homebrew and these dependencies. 
-
-The script is **zsh**; macOS ships with zsh by default.
-
-The pdf-squeeze script probably works in Linux but it hasn't been tested. 
 
 ---
 
 ## Installation
 
-### Quick Installation
-Enter this into Terminal:
+`pdf-squeeze` and the associated installer should run on both macOS and Linux. The installer is the same for both.
+
+Re-running the installer should update with the latest version from the repo.
+
+Please note that the **Linux version has not been tested**. It should work. It may not do.
+
+### Quick Install (macOS & Linux)
+
+Copy and paste this into a Terminal window:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts/install-pdf-squeeze.sh | bash
 ```
-Re-running this should update with the latest version from the repo.
 
-### Quick Uninstallation
-Enter this into Terminal:
+- Installs `pdf-squeeze` to `~/bin` (default; override with `--prefix /path`).
+
+- Installs required dependencies automatically via **Homebrew** (macOS) or your package manager (Linux e.g. **apt**, **dnf**, or **brew** if present).
+
+	- **Ghostscript** (`gs`)
+	- **pdfcpu**
+	- **qpdf** (for encrypted‑PDF handling and tests)
+	- **exiftool**
+	- **poppler** (**poppler-utils** on Linux)
+	- **coreutils**
+	- **mupdf-tools** *(automatically preferred; falls back to `mupdf` if already installed)*
+	- **parallel** (optional, speeds up batch jobs)
+
+- **Does not** install DEVONthink scripts unless explicitly requested. (Obviously, this is a macOS-only feature.)
+
+- `sudo` may be required for installing dependencies on some distributions.  
+
+- The pdf-squeeze CLI works the same across macOS and Linux.
+
+
+**Optional: Install DEVONthink scripts (macOS only)**  
+
+If you want the DEVONthink integration (the Compress PDF Now and PDF Squeeze (Smart Rule) scripts), use:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts/install-pdf-squeeze.sh --uninstall | bash
+curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts/install-pdf-squeeze.sh \
+  | bash -s -- --with-devonthink
+```
+
+This will install the compiled .scpt files into the correct ~/Library/Application Scripts/... folders for DEVONthink 4 (and DEVONthink 3 if detected).
+
+---
+
+### Uninstallation
+
+Uninstallation is the same on macOS and Linux. If you installed the DEVONthink scripts, they will also be removed.
+
+Copy and paste this into a Terminal window:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts/install-pdf-squeeze.sh | bash -s -- --uninstall
 ```
 
 ---
@@ -246,7 +268,58 @@ pdf-squeeze --inplace --post-hook 'echo Processed: {} >> ~/processed.log' ~/Scan
 
 ---
 
-## Integration notes
+## Compression Logic (what happens under the hood)
+
+`pdf-squeeze` aims for “smaller, still-good” — not just the smallest possible bytes. The pipeline is content-aware and tuned to keep text selectable, preserve vector graphics when possible, and compress raster images aggressively only when it’s safe.
+
+### High-level flow
+1. **Probe & classify pages**  
+   Identify text/vector vs raster-heavy pages (via `pdfcpu`, `mutool`, `pdfinfo`).  
+   Decide whether pages can remain vector or should be re-rasterized.
+
+2. **Preset-driven image policy**  
+   Each preset picks **target DPI** (per color/gray/mono) and **JPEG quality**.  
+   - `light`: gentle downsampling; good for already decent PDFs  
+   - `standard`: strong savings, safe for most scans  
+   - `extreme`: maximum shrinking while remaining legible  
+   - `lossless`: structural optimizations only; no lossy image recompression  
+   - `archive`: high compression tuned for printable distribution
+
+3. **Ghostscript synthesis**  
+   Ghostscript (`pdfwrite`) is used to:
+   - **Downsample** large raster images to preset DPIs  
+   - **Recompress** images (JPEG for color/gray, CCITT/Flate for mono)  
+   - **Linearize** and compact object streams  
+   - **Keep vector text/graphics** where feasible  
+   - Respect metadata/date flags (`--keep-metadata`, `--keep-date`)
+
+4. **Encrypted PDFs**  
+   - Without a password → **safe skip** (no modification).  
+   - With `--password`/`--password-file` → **decrypt to a temp**, process, then re-emit a normal PDF.
+
+5. **Determinism & timestamps**  
+   - `--deterministic` (default) yields reproducible results for identical inputs & presets.  
+   - `--keep-date` (default) preserves mtime/atime; `--no-keep-date` refreshes them.
+
+6. **Safety rails**  
+   - `--min-gain` keeps the original unless savings meet your threshold.  
+   - `--skip-if-smaller` avoids work on tiny inputs.  
+   - In `--inplace` mode, the original is only replaced if the new file qualifies.
+
+### Preset guide (ballpark)
+| Preset    | Color/Gray DPI | JPEG Q | Mono DPI | Notes |
+|-----------|-----------------|--------|----------|-------|
+| light     | ~225–300        | 80–85  | 300–400  | Gentle; good for already-optimized PDFs |
+| standard  | ~180–225        | 72–80  | 300–400  | Solid default for scans & mixed docs |
+| extreme   | ~120–180        | 60–72  | 300      | Maximum shrink while staying readable |
+| lossless  | keep            | n/a    | keep     | No lossy recompress; structural tweaks only |
+| archive   | ~150–200        | 65–75  | 300–400  | Small + printable, suitable for distribution |
+
+> Exact knobs vary per-version; the intent is consistent: **balance size with legibility**. Use `--debug` to see the selected DPI/quality per run.
+
+---
+
+## Integration Notes
 
 ### Determinism
 - `--deterministic` ensures bit-for-bit reproducibility for identical inputs when using the same preset and options.
@@ -284,10 +357,15 @@ pdf-squeeze --inplace --post-hook 'echo Processed: {} >> ~/processed.log' ~/Scan
 
 There are two AppleScripts provided:
 
-1.	**Compress PDF Now** — a menu/toolbar action to compress the selected PDFs immediately.
-2.	**PDF Squeeze (Smart Rule)** — a handler for DEVONthink Smart Rules to compress PDFs automatically when they meet certain conditions (e.g. added to a group, file size > X).
+1. **Compress PDF Now** — a menu/toolbar action to compress the selected PDFs immediately.
+2. **PDF Squeeze (Smart Rule)** — a handler for DEVONthink Smart Rules to compress PDFs automatically when they meet certain conditions (e.g. added to a group, file size > X).
+
 
 By default, both scripts use **pdf-squeeze** with the **standard** compression preset, but this can be changed by editing the AppleScript headers if you prefer a different preset.
+
+Let DEVONthink complete OCR **before** compression (pdf-squeeze does **not** perform OCR).
+
+Smart Rules can safely run `--inplace mode`; timestamps are preserved unless overridden with --no-keep-date.
 
 ### Installation
 
@@ -315,11 +393,6 @@ Use the `--prefix` option if you need to override defaults.
 - Under **Perform the following actions**, select **Apply Script…** and choose
 **PDF Squeeze (Smart Rule)**.
 - For unattended operation, use `--inplace --min-gain 1` for safety, or customise flags in the AppleScript source.
-
-### More Guidance
-- When used with DEVONthink scripts:
-- Let DEVONthink complete OCR **before** compression (pdf-squeeze does **not** perform OCR).
-- Smart Rules can safely run `--inplace mode`; timestamps are preserved unless overridden with --no-keep-date.
 
 **Recommended Defaults**
 
@@ -375,6 +448,8 @@ Use the `--prefix` option if you need to override defaults.
 ---
 
 # Development
+
+This is only relevant to those who want to reuse or extend pdf-squeeze.
 
 ## Build and Install
 
