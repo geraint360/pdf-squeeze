@@ -55,6 +55,9 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# Legacy shim (harmless if unused):
+detect_dt_apps() { :; }
+
 on_macos()  { [[ "$(uname -s)" == "Darwin" ]]; }
 on_linux()  { [[ "$(uname -s)" == "Linux"  ]]; }
 
@@ -246,8 +249,11 @@ install_deps_linux() {
 # Echo the DEVONthink "Application Scripts" base dir(s) to target, one per line.
 # Honors DT_MODE (auto|3|4). In auto mode, detect installed apps; if none found,
 # default to both locations so the user can copy later if desired.
+# Echo the DEVONthink "Application Scripts" base dir(s) to target, one per line.
+# Honors DT_MODE (auto|3|4). In auto mode, detect installed apps; if none found,
+# default to both locations so users can copy later if desired.
 dt_target_dirs() {
-  local want="$DT_MODE"
+  local want="${DT_MODE:-auto}"
   local d4="/Applications/DEVONthink 4.app"
   local d3="/Applications/DEVONthink 3.app"
   local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
@@ -264,7 +270,6 @@ dt_target_dirs() {
       local any=0
       if [[ -d "$d4" ]]; then printf '%s\n' "$base4"; any=1; fi
       if [[ -d "$d3" ]]; then printf '%s\n' "$base3"; any=1; fi
-      # If neither app bundle is present, fall back to both so we don’t block installs.
       if [[ $any -eq 0 ]]; then
         printf '%s\n' "$base4"
         printf '%s\n' "$base3"
