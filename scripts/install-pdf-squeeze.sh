@@ -249,27 +249,43 @@ install_deps_linux() {
 # Echo the DEVONthink "Application Scripts" base dir(s) to target, one per line.
 # Honors DT_MODE (auto|3|4). In auto mode, detect installed apps; if none found,
 # default to both locations so the user can copy later if desired.
-# Echo the DEVONthink "Application Scripts" base dir(s) to target, one per line.
-# Honors DT_MODE (auto|3|4). In auto mode, detect installed apps; if none found,
-# default to both locations so users can copy later if desired.
+# Detect DEVONthink by bundle IDs, then emit only the matching App Scripts base dir(s).
 dt_target_dirs() {
   local want="${DT_MODE:-auto}"
-  local d4="/Applications/DEVONthink 4.app"
-  local d3="/Applications/DEVONthink 3.app"
+
+  # Resolve presence via Spotlight (fast, robust)
+  local has4=0 has3=0
+  /usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.devon-technologies.think4'" -onlyin /Applications >/dev/null 2>&1 && has4=1
+  /usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.devon-technologies.think3'" -onlyin /Applications >/dev/null 2>&1 && has3=1
+
+  # Fallback if Spotlight is disabled: check app bundle folders
+  if [[ $has4 -eq 0 && -d "/Applications/DEVONthink 4.app" ]]; then has4=1; fi
+  if [[ $has3 -eq 0 && -d "/Applications/DEVONthink 3.app" ]]; then has3=1; fi
+
   local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
   local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
 
   case "$want" in
+    4)  [[ $has4 -eq 1 ]] && printf '%s\n' "$base4" ;;
+    3)  [[ $has3 -eq 1 ]] && printf '%s\n' "$base3" ;;
+    auto|*)
+         [[ $has4 -eq 1 ]] && printf '%s\n' "$base4"
+         [[ $has3 -eq 1 ]] && printf '%s\n' "$base3"
+         ;;
+  esac
+}
+# If DT_MODE explicitly selects 3 or 4, remove scripts from the other version
+cleanup_other_dt_version_if_explicit() {
+  case "${DT_MODE:-auto}" in
     4)
-      [[ -d "$d4" ]] && printf '%s\n' "$base4"
+      local other="$HOME/Library/Application Scripts/com.devon-technologies.think3"
+      rm -f "$other/Menu/Compress PDF Now.scpt" \
+            "$other/Smart Rules/PDF Squeeze (Smart Rule).scpt" 2>/dev/null || true
       ;;
     3)
-      [[ -d "$d3" ]] && printf '%s\n' "$base3"
-      ;;
-    auto|*)
-      # Only emit directories for actually installed versions; no fallback.
-      [[ -d "$d4" ]] && printf '%s\n' "$base4"
-      [[ -d "$d3" ]] && printf '%s\n' "$base3"
+      local other="$HOME/Library/Application Scripts/com.devon-technologies.think"
+      rm -f "$other/Menu/Compress PDF Now.scpt" \
+            "$other/Smart Rules/PDF Squeeze (Smart Rule).scpt" 2>/dev/null || true
       ;;
   esac
 }
@@ -336,8 +352,9 @@ install_files() {
   chmod +x "$bin_dst"
 
   if on_macos && [[ $INSTALL_DT -eq 1 ]]; then
-    install_dt_scripts_macos
-  fi
+  	cleanup_other_dt_version_if_explicit
+  	install_dt_scripts_macos
+	fi
 }
 
 uninstall_everything() {
