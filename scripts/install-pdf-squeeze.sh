@@ -267,13 +267,9 @@ dt_target_dirs() {
       [[ -d "$d3" ]] && printf '%s\n' "$base3"
       ;;
     auto|*)
-      local any=0
-      if [[ -d "$d4" ]]; then printf '%s\n' "$base4"; any=1; fi
-      if [[ -d "$d3" ]]; then printf '%s\n' "$base3"; any=1; fi
-      if [[ $any -eq 0 ]]; then
-        printf '%s\n' "$base4"
-        printf '%s\n' "$base3"
-      fi
+      # Only emit directories for actually installed versions; no fallback.
+      [[ -d "$d4" ]] && printf '%s\n' "$base4"
+      [[ -d "$d3" ]] && printf '%s\n' "$base3"
       ;;
   esac
 }
@@ -381,21 +377,50 @@ verify_report() {
   echo "gstat: $(command -v gstat || echo 'missing (from coreutils)')"
   echo "parallel: $(command -v parallel || echo 'missing (optional)')"
   echo
-  if on_macos; then
-    echo "DEVONthink scripts (mode=$DT_MODE):"
-    local any=0
-    while IFS= read -r base; do
-      [[ -n "$base" ]] || continue
-      any=1
-      local menu="$base/Menu/Compress PDF Now.scpt"
-      local rule="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
-      [[ -f "$menu" ]] && echo "  OK      $menu" || echo "  MISSING $menu"
-      [[ -f "$rule" ]] && echo "  OK      $rule" || echo "  MISSING $rule"
-    done < <(dt_target_dirs)
-    [[ $any -eq 0 ]] && echo "  (no matching DEVONthink installation detected; nothing expected)"
-  else
-    echo "DEVONthink: (not applicable on Linux)"
-  fi
+	if on_macos; then
+		# Only report DT status if user requested DT install OR scripts already exist.
+		if [[ $INSTALL_DT -eq 1 ]]; then
+			echo "DEVONthink scripts (mode=$DT_MODE):"
+			local any=0
+			while IFS= read -r base; do
+				[[ -n "$base" ]] || continue
+				any=1
+				local menu="$base/Menu/Compress PDF Now.scpt"
+				local rule="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+				[[ -f "$menu" ]] && echo "  OK      $menu" || echo "  MISSING $menu"
+				[[ -f "$rule" ]] && echo "  OK      $rule" || echo "  MISSING $rule"
+			done < <(dt_target_dirs)
+			[[ $any -eq 0 ]] && echo "  (no matching DEVONthink installation detected; nothing expected)"
+		else
+			# Check silently whether any DT scripts are present; if so, list them,
+			# otherwise just say it was skipped.
+			local any_exist=0
+			while IFS= read -r base; do
+				[[ -n "$base" ]] || continue
+				for f in \
+					"$base/Menu/Compress PDF Now.scpt" \
+					"$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+				do
+					[[ -f "$f" ]] && any_exist=1
+				done
+			done < <(dt_target_dirs)
+	
+			if [[ $any_exist -eq 1 ]]; then
+				echo "DEVONthink scripts detected (mode=$DT_MODE):"
+				while IFS= read -r base; do
+					[[ -n "$base" ]] || continue
+					local menu="$base/Menu/Compress PDF Now.scpt"
+					local rule="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+					[[ -f "$menu" ]] && echo "  OK      $menu" || true
+					[[ -f "$rule" ]] && echo "  OK      $rule" || true
+				done < <(dt_target_dirs)
+			else
+				echo "DEVONthink: (skipped; pass --with-devonthink to install)"
+			fi
+		fi
+	else
+		echo "DEVONthink: (not applicable on Linux)"
+	fi
   echo
   echo "PREFIX: $INSTALL_PREFIX"
   if [[ ":$PATH:" == *":$INSTALL_PREFIX:"* ]]; then
