@@ -19,7 +19,9 @@ INSTALL_PREFIX="$PREFIX_DEFAULT"
 INSTALL_PARALLEL=1
 VERIFY_ONLY=0
 UNINSTALL=0
-INSTALL_DT=0   # macOS only (off by default)
+INSTALL_DT=0              # macOS only (off by default)
+DT_MODE="auto"            # Which DEVONthink to target on macOS: auto|3|4
+
 
 log() { printf "%s\n" "$*" >&2; }
 die() { log "Error: $*"; exit 1; }
@@ -30,6 +32,7 @@ Usage: $0 [options]
 
 Options:
   --with-devonthink   Install DEVONthink scripts on macOS
+  --dt {auto|3|4}     Target DEVONthink version on macOS (default: auto)
   --prefix PATH       Where to install pdf-squeeze (default: $PREFIX_DEFAULT)
   --no-parallel       Do not install GNU parallel
   --verify-only       Check installation status without making changes
@@ -42,6 +45,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) shift; INSTALL_PREFIX="${1:-}"; [[ -n "${INSTALL_PREFIX}" ]] || die "--prefix needs a path";;
     --with-devonthink) INSTALL_DT=1;;
+		--dt) shift; DT_MODE="${1:-auto}"; [[ "$DT_MODE" =~ ^(auto|3|4)$ ]] || die "--dt must be auto|3|4";;
     --no-parallel) INSTALL_PARALLEL=0;;
     --verify-only) VERIFY_ONLY=1;;
     --uninstall) UNINSTALL=1;;
@@ -237,6 +241,80 @@ install_deps_linux() {
   install_pdfcpu_linux_if_missing
 }
 
+# ---------- DEVONthink installation ----------
+
+# Detect installed DEVONthink apps (sets DT3_PRESENT/DT4_PRESENT=1 if found)
+detect_dt_apps() {
+  DT3_PRESENT=0; DT4_PRESENT=0
+  # Common locations
+  local cands4=(
+    "/Applications/DEVONthink 4.app"
+    "$HOME/Applications/DEVONthink 4.app"
+  )
+  local cands3=(
+    "/Applications/DEVONthink 3.app"
+    "$HOME/Applications/DEVONthink 3.app"
+  )
+  for p in "${cands4[@]}"; do [[ -d "$p" ]] && { DT4_PRESENT=1; break; }; done
+  for p in "${cands3[@]}"; do [[ -d "$p" ]] && { DT3_PRESENT=1; break; }; done
+}
+
+# Return a list of base script dirs we should install to, based on DT_MODE and what is installed
+# Usage: mapfile -t bases < <(dt_target_dirs)
+dt_target_dirs() {
+  detect_dt_apps
+  case "$DT_MODE" in
+    4)
+      [[ $DT4_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think"
+      ;;
+    3)
+      [[ $DT3_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think3"
+      ;;
+    auto)
+      # If both are installed, install to both; otherwise whichever exists.
+      [[ $DT4_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think"
+      [[ $DT3_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think3"
+      ;;
+  esac
+}
+install_dt_scripts_macos() {
+  mapfile -t bases < <(dt_target_dirs)
+  if [[ ${#bases[@]} -eq 0 ]]; then
+    log "[get] DEVONthink not found (mode=$DT_MODE); skipping AppleScript install."
+    return 0
+  fi
+
+  local base_url="$REPO_RAW/devonthink-scripts/src"
+  local src_menu_url="$base_url/Compress%20PDF%20Now.applescript"
+  local src_rule_url="$base_url/PDF%20Squeeze%20(Smart%20Rule).applescript"
+
+  local tmp_dir src_menu src_rule
+  tmp_dir="$(mktemp -d)"
+  src_menu="$tmp_dir/Compress PDF Now.applescript"
+  src_rule="$tmp_dir/PDF Squeeze (Smart Rule).applescript"
+
+  log "[get] Fetching AppleScript sources…"
+  curl -fsSL -o "$src_menu" "$src_menu_url"
+  curl -fsSL -o "$src_rule" "$src_rule_url"
+
+  for base in "${bases[@]}"; do
+    local menu_dir="$base/Menu"
+    local rules_dir="$base/Smart Rules"
+    mkdir -p "$menu_dir" "$rules_dir"
+
+    /usr/bin/osacompile -o "$menu_dir/Compress PDF Now.scpt"         "$src_menu"
+    /usr/bin/osacompile -o "$rules_dir/PDF Squeeze (Smart Rule).scpt" "$src_rule"
+
+    log "[get] Installed DT scripts to:"
+    log "  - $menu_dir/Compress PDF Now.scpt"
+    log "  - $rules_dir/PDF Squeeze (Smart Rule).scpt"
+  done
+
+  rm -rf "$tmp_dir"
+}
+
+# ---------- Main Installer ----------
+
 ensure_dirs() {
   mkdir -p "$INSTALL_PREFIX"
   if [[ "$INSTALL_PREFIX" == "$HOME/bin" ]]; then
@@ -250,34 +328,6 @@ ensure_dirs() {
 download_to() {
   local url="$1" dst="$2"
   curl -fsSL "$url" -o "$dst"
-}
-
-install_dt_scripts_macos() {
-  log "[get] Installing DEVONthink scripts (.scpt)"
-  local base="$HOME/Library/Application Scripts/com.devon-technologies.think"
-  local menu_dir="$base/Menu"
-  local rules_dir="$base/Smart Rules"
-  mkdir -p "$menu_dir" "$rules_dir"
-
-  local base_url="$REPO_RAW/devonthink-scripts/src"
-  local src_menu_url="$base_url/Compress%20PDF%20Now.applescript"
-  local src_rule_url="$base_url/PDF%20Squeeze%20(Smart%20Rule).applescript"
-
-  local tmp_dir src_menu src_rule
-  tmp_dir="$(mktemp -d)"
-  src_menu="$tmp_dir/Compress PDF Now.applescript"
-  src_rule="$tmp_dir/PDF Squeeze (Smart Rule).applescript"
-
-  curl -fsSL -o "$src_menu" "$src_menu_url"
-  curl -fsSL -o "$src_rule" "$src_rule_url"
-
-  /usr/bin/osacompile -o "$menu_dir/Compress PDF Now.scpt"         "$src_menu"
-  /usr/bin/osacompile -o "$rules_dir/PDF Squeeze (Smart Rule).scpt" "$src_rule"
-
-  rm -rf "$tmp_dir"
-  log "[get] Installed:"
-  log "  - $menu_dir/Compress PDF Now.scpt"
-  log "  - $rules_dir/PDF Squeeze (Smart Rule).scpt"
 }
 
 install_files() {
@@ -297,14 +347,19 @@ uninstall_everything() {
   local bin_dst="$INSTALL_PREFIX/pdf-squeeze"
   if [[ -f "$bin_dst" ]]; then rm -f "$bin_dst"; log "[rm] $bin_dst"; removed=1; fi
 
-  if on_macos; then
-    local dt_menu="$HOME/Library/Application Scripts/com.devon-technologies.think/Menu/Compress PDF Now.scpt"
-    local dt_rules="$HOME/Library/Application Scripts/com.devon-technologies.think/Smart Rules/PDF Squeeze (Smart Rule).scpt"
-    local dt3_menu="$HOME/Library/Application Scripts/com.devon-technologies.think3/Menu/Compress PDF Now.scpt"
-    local dt3_rules="$HOME/Library/Application Scripts/com.devon-technologies.think3/Smart Rules/PDF Squeeze (Smart Rule).scpt"
-    for f in "$dt_menu" "$dt_rules" "$dt3_menu" "$dt3_rules"; do
-      if [[ -f "$f" ]]; then rm -f "$f"; log "[rm] $f"; removed=1; fi
-    done
+	if on_macos; then
+    mapfile -t bases < <(dt_target_dirs)
+    if [[ ${#bases[@]} -eq 0 ]]; then
+      log "[uninstall] No matching DEVONthink installation detected (mode=$DT_MODE)."
+    else
+      for base in "${bases[@]}"; do
+        local dt_menu="$base/Menu/Compress PDF Now.scpt"
+        local dt_rules="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+        for f in "$dt_menu" "$dt_rules"; do
+          if [[ -f "$f" ]]; then rm -f "$f"; log "[rm] $f"; removed=1; fi
+        done
+      done
+    fi
   fi
 
   if [[ $removed -eq 0 ]]; then
@@ -327,16 +382,20 @@ verify_report() {
   echo "gstat: $(command -v gstat || echo 'missing (from coreutils)')"
   echo "parallel: $(command -v parallel || echo 'missing (optional)')"
   echo
-  if on_macos; then
-    echo "DEVONthink scripts:"
-    for f in \
-      "$HOME/Library/Application Scripts/com.devon-technologies.think/Menu/Compress PDF Now.scpt" \
-      "$HOME/Library/Application Scripts/com.devon-technologies.think/Smart Rules/PDF Squeeze (Smart Rule).scpt" \
-      "$HOME/Library/Application Scripts/com.devon-technologies.think3/Menu/Compress PDF Now.scpt" \
-      "$HOME/Library/Application Scripts/com.devon-technologies.think3/Smart Rules/PDF Squeeze (Smart Rule).scpt"
-    do
-      if [[ -f "$f" ]]; then echo "  OK  $f"; else echo "  MISSING  $f"; fi
-    done
+    if on_macos; then
+    echo "DEVONthink scripts (mode=$DT_MODE):"
+    detect_dt_apps
+    mapfile -t bases < <(dt_target_dirs)
+    if [[ ${#bases[@]} -eq 0 ]]; then
+      echo "  (no matching DEVONthink installation detected; nothing expected)"
+    else
+      for base in "${bases[@]}"; do
+        menu="$base/Menu/Compress PDF Now.scpt"
+        rule="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+        [[ -f "$menu" ]] && echo "  OK  $menu" || echo "  MISSING  $menu"
+        [[ -f "$rule" ]] && echo "  OK  $rule" || echo "  MISSING  $rule"
+      done
+    fi
   else
     echo "DEVONthink: (not applicable on Linux)"
   fi
