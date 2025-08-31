@@ -5,22 +5,21 @@ set -euo pipefail
 # - Installs Homebrew on macOS (if missing)
 # - Installs deps (gs, pdfcpu, qpdf, exiftool, poppler, coreutils, mutool, parallel*)
 # - Installs pdf-squeeze to ~/bin (override with --prefix)
-# - Installs DEVONthink scripts on macOS (DT4/DT3), skipped on Linux
+# - Installs DEVONthink scripts on macOS (DT4/DT3) only when --with-devonthink is passed
 # - Supports: --no-parallel, --verify-only, --uninstall
 #
+# Usage:
 # curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts/install-pdf-squeeze.sh | bash
 #
-# Change log: adds Linux detection + per-distro dependency handling.
-#
 REPO_RAW="https://raw.githubusercontent.com/geraint360/pdf-squeeze/main"
-PDFCPU_VERSION="0.11.0"   # used for Linux install if pdfcpu is missing
+PDFCPU_VERSION="0.11.0"   # linux fallback download if no package is available
 
 PREFIX_DEFAULT="$HOME/bin"
 INSTALL_PREFIX="$PREFIX_DEFAULT"
 INSTALL_PARALLEL=1
 VERIFY_ONLY=0
 UNINSTALL=0
-INSTALL_DT=0   # macOS: install DEVONthink scripts only when --with-devonthink is passed
+INSTALL_DT=0   # macOS only (off by default)
 
 log() { printf "%s\n" "$*" >&2; }
 die() { log "Error: $*"; exit 1; }
@@ -70,14 +69,12 @@ have_brew() {
   if [[ -x /usr/local/bin/brew ]]; then brew_path=/usr/local/bin/brew; return 0; fi
   return 1
 }
-
 eval_brew_shellenv() {
   if have_brew; then
     # shellcheck disable=SC2046
     eval "$($brew_path shellenv)"
   fi
 }
-
 install_homebrew_if_needed() {
   if have_brew; then eval_brew_shellenv; return; fi
   log "[brew] Installing Homebrew..."
@@ -85,7 +82,6 @@ install_homebrew_if_needed() {
   have_brew || die "Homebrew installation appears to have failed."
   eval_brew_shellenv
 }
-
 brew_install_if_missing() {
   local pkg="$1"
   if ! brew list --formula --versions "$pkg" >/dev/null 2>&1; then
@@ -95,7 +91,6 @@ brew_install_if_missing() {
     log "[brew] $pkg already installed."
   fi
 }
-
 ensure_mutool_macos() {
   if command -v mutool >/dev/null 2>&1; then
     log "[deps] mutool OK ($(command -v mutool))"
@@ -104,16 +99,15 @@ ensure_mutool_macos() {
   # Try to link from mupdf or install mupdf-tools
   if brew list --versions mupdf >/dev/null 2>&1; then
     brew link mupdf >/dev/null 2>&1 || true
-    command -v mutool >/dev/null 2>&1 && { log "[deps] mutool OK via mupdf"; return 0; }
+    if command -v mutool >/dev/null 2>&1; then log "[deps] mutool OK via mupdf"; return 0; fi
   fi
   log "[deps] installing mupdf-tools to provide mutool..."
-  brew install mupdf-tools || {
+  if ! brew install mupdf-tools; then
     log "[deps] Homebrew refused mupdf-tools (conflict with mupdf). Try: brew unlink mupdf && brew install mupdf-tools"
     return 1
-  }
+  fi
   command -v mutool >/dev/null 2>&1 || die "mutool still not found after installing mupdf-tools"
 }
-
 install_deps_macos() {
   install_homebrew_if_needed
   eval_brew_shellenv
@@ -126,13 +120,13 @@ install_deps_macos() {
 # ---------- Linux (apt/dnf/pacman/zypper) ----------
 pkg_mgr=""
 detect_pkg_mgr() {
-  if command -v apt-get >/dev/null 2>&1; then pkg_mgr="apt"; return
-  elif command -v dnf >/dev/null 2>&1; then pkg_mgr="dnf"; return
-  elif command -v pacman >/dev/null 2>&1; then pkg_mgr="pacman"; return
-  elif command -v zypper >/dev/null 2>&1; then pkg_mgr="zypper"; return
-  else pkg_mgr=""; fi
+  if command -v apt-get >/dev/null 2>&1; then pkg_mgr="apt"
+  elif command -v dnf      >/dev/null 2>&1; then pkg_mgr="dnf"
+  elif command -v pacman   >/dev/null 2>&1; then pkg_mgr="pacman"
+  elif command -v zypper   >/dev/null 2>&1; then pkg_mgr="zypper"
+  else pkg_mgr=""
+  fi
 }
-
 linux_install_pkgs() {
   # Arguments: packages...
   local pkgs=("$@")
@@ -145,7 +139,7 @@ linux_install_pkgs() {
       sudo dnf install -y "${pkgs[@]}"
       ;;
     pacman)
-      sudo pacman -Syu --noconfirm "${pkgs[@]}"
+      sudo pacman -Sy --noconfirm "${pkgs[@]}"
       ;;
     zypper)
       sudo zypper refresh
@@ -156,7 +150,6 @@ linux_install_pkgs() {
       ;;
   esac
 }
-
 install_pdfcpu_linux_if_missing() {
   if command -v pdfcpu >/dev/null 2>&1; then
     log "[deps] pdfcpu already present ($(command -v pdfcpu))"
@@ -164,64 +157,78 @@ install_pdfcpu_linux_if_missing() {
   fi
   # Try package first (some distros package it)
   case "$pkg_mgr" in
-    apt)    sudo apt-get install -y pdfcpu || true ;;
-    dnf)    sudo dnf install -y pdfcpu     || true ;;
-    pacman) sudo pacman -S --noconfirm pdfcpu || true ;;
-    zypper) sudo zypper install -y pdfcpu  || true ;;
+    apt)    sudo apt-get install -y pdfcpu     || true ;;
+    dnf)    sudo dnf install -y pdfcpu         || true ;;
+    pacman) sudo pacman -S --noconfirm pdfcpu  || true ;;
+    zypper) sudo zypper install -y pdfcpu      || true ;;
   esac
   if command -v pdfcpu >/dev/null 2>&1; then
     log "[deps] pdfcpu installed via package manager"
     return
   fi
-  # Fallback: download prebuilt release
+  # Fallback: download prebuilt release (try a few common asset names)
   local arch; arch="$(arch_id)"
-  local tmp dir
+  local tmp dir url
   tmp="$(mktemp -d)"
   dir="$tmp/pdfcpu"
   mkdir -p "$dir"
-  local url="https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_linux_${arch}.tar.xz"
-  log "[deps] Fetching pdfcpu ${PDFCPU_VERSION} for linux/${arch}"
-  curl -fsSL "$url" -o "$tmp/pdfcpu.tar.xz" || die "Failed to download pdfcpu tarball"
+
+  # Try candidates
+  urls=(
+    "https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_linux_${arch}.tar.xz"
+    "https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_Linux_${arch}.tar.xz"
+    "https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_Linux_$( [[ $arch == amd64 ]] && echo x86_64 || echo ${arch} ).tar.xz"
+  )
+  local ok=0
+  for url in "${urls[@]}"; do
+    log "[deps] Trying $url"
+    if curl -fsSL "$url" -o "$tmp/pdfcpu.tar.xz"; then ok=1; break; fi
+  done
+  [[ $ok -eq 1 ]] || die "Failed to download pdfcpu tarball"
+
   tar -xJf "$tmp/pdfcpu.tar.xz" -C "$dir"
-  # Expect a 'pdfcpu' binary inside; install to /usr/local/bin if writable, else ~/bin
-  if [[ -w /usr/local/bin ]]; then
-    sudo install -m 0755 "$dir/pdfcpu" /usr/local/bin/pdfcpu
-    log "[deps] pdfcpu -> /usr/local/bin/pdfcpu"
+  if [[ -f "$dir/pdfcpu" ]]; then
+    if [[ -w /usr/local/bin ]]; then
+      sudo install -m 0755 "$dir/pdfcpu" /usr/local/bin/pdfcpu
+      log "[deps] pdfcpu -> /usr/local/bin/pdfcpu"
+    else
+      mkdir -p "$HOME/bin"
+      install -m 0755 "$dir/pdfcpu" "$HOME/bin/pdfcpu"
+      log "[deps] pdfcpu -> $HOME/bin/pdfcpu (add \$HOME/bin to PATH if needed)"
+    fi
   else
-    mkdir -p "$HOME/bin"
-    install -m 0755 "$dir/pdfcpu" "$HOME/bin/pdfcpu"
-    log "[deps] pdfcpu -> $HOME/bin/pdfcpu (add \$HOME/bin to PATH if needed)"
+    die "pdfcpu binary not found in downloaded archive"
   fi
   rm -rf "$tmp"
 }
-
 install_deps_linux() {
   detect_pkg_mgr
-  #[[ -n "$pkg_mgr" ]] || die "Could not detect a supported package manager."
-  if [[ -n "$pkg_mgr" ]]; then
-  	"Could not detect a supported package manager."
-  fi
+  [[ -n "$pkg_mgr" ]] || die "Could not detect a supported package manager."
 
-  # Base requirements present in most repos
-  local pkgs=(ghostscript qpdf exiftool poppler-utils coreutils)
-  # mutool provider
-  if "$pkg_mgr" == "apt"; then
-    pkgs+=(mupdf-tools)
-  else
-    # some distros ship 'mupdf-tools', others bundle mutool in 'mupdf'
-    if "$pkg_mgr" == "dnf"; then pkgs+=(mupdf-tools || true); fi
-    # For pacman/zypper, package names vary; try both:
-    :
-  fi
-  # Optional
+  # Map package names per distro
+  local pkgs=()
+  case "$pkg_mgr" in
+    apt)
+      pkgs=(ghostscript qpdf libimage-exiftool-perl poppler-utils coreutils mupdf-tools)
+      ;;
+    dnf)
+      pkgs=(ghostscript qpdf perl-Image-ExifTool poppler-utils coreutils mupdf-tools)
+      ;;
+    pacman)
+      pkgs=(ghostscript qpdf perl-image-exiftool poppler coreutils mupdf-tools)
+      ;;
+    zypper)
+      pkgs=(ghostscript qpdf exiftool poppler-tools coreutils mupdf-tools)
+      ;;
+  esac
   if [[ $INSTALL_PARALLEL -eq 1 ]]; then pkgs+=(parallel); fi
 
   log "[install] Installing Linux dependencies via $pkg_mgr..."
   linux_install_pkgs "${pkgs[@]}"
 
-  # Ensure mutool exists (mandatory)
+  # Ensure mutool exists (mandatory). If the chosen package set didn't provide it, try 'mupdf'.
   if ! command -v mutool >/dev/null 2>&1; then
-    # Try fallback: install 'mupdf'
+    log "[deps] mutool not found, trying 'mupdf' as a provider..."
     linux_install_pkgs mupdf || true
     command -v mutool >/dev/null 2>&1 || die "mutool not found (install 'mupdf-tools' or 'mupdf')."
   fi

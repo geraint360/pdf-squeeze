@@ -65,7 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts
   | bash -s -- --with-devonthink
 ```
 
-This will install the compiled .scpt files into the correct ~/Library/Application Scripts/... folders for DEVONthink 4 (and DEVONthink 3 if detected).
+This will download, compile and install the  Applescripts into the correct ~/Library/Application Scripts/... folders for DEVONthink 4 (and DEVONthink 3 if detected).
 
 ---
 
