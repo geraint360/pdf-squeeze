@@ -43,8 +43,8 @@ curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts
 	- **Ghostscript** (`gs`)
 	- **pdfcpu**
 	- **qpdf** (for encrypted‑PDF handling and tests)
-	- **exiftool**
-	- **poppler** (**poppler-utils** on Linux)
+	- **exiftool** (or libimage-exiftool-perl (Debian/Ubuntu), perl-Image-ExifTool (Fedora), perl-image-exiftool (Arch), exiftool (openSUSE) on Linux)
+	- **poppler** (poppler-utils (Debian/Fedora), poppler (Arch), poppler-tools (openSUSE) on Linux)
 	- **coreutils**
 	- **mupdf-tools** *(automatically preferred; falls back to `mupdf` if already installed)*
 	- **parallel** (optional, speeds up batch jobs)

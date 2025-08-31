@@ -197,7 +197,10 @@ install_pdfcpu_linux_if_missing() {
 
 install_deps_linux() {
   detect_pkg_mgr
-  [[ -n "$pkg_mgr" ]] || die "Could not detect a supported package manager."
+  #[[ -n "$pkg_mgr" ]] || die "Could not detect a supported package manager."
+  if [[ -n "$pkg_mgr" ]]; then
+  	"Could not detect a supported package manager."
+  fi
 
   # Base requirements present in most repos
   local pkgs=(ghostscript qpdf exiftool poppler-utils coreutils)
