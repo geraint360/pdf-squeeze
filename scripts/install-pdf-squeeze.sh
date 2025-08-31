@@ -250,17 +250,19 @@ install_deps_linux() {
 # Honors DT_MODE (auto|3|4). In auto mode, detect installed apps; if none found,
 # default to both locations so the user can copy later if desired.
 # Detect DEVONthink by bundle IDs, then emit only the matching App Scripts base dir(s).
+# Return DT "Application Scripts" dir(s) for actually installed versions only.
+# Honors DT_MODE=auto|3|4.
 dt_target_dirs() {
   local want="${DT_MODE:-auto}"
 
-  # Resolve presence via Spotlight (fast, robust)
-  local has4=0 has3=0
-  /usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.devon-technologies.think4'" -onlyin /Applications >/dev/null 2>&1 && has4=1
-  /usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.devon-technologies.think3'" -onlyin /Applications >/dev/null 2>&1 && has3=1
+  local app4="/Applications/DEVONthink 4.app"
+  local app4_user="$HOME/Applications/DEVONthink 4.app"
+  local app3="/Applications/DEVONthink 3.app"
+  local app3_user="$HOME/Applications/DEVONthink 3.app"
 
-  # Fallback if Spotlight is disabled: check app bundle folders
-  if [[ $has4 -eq 0 && -d "/Applications/DEVONthink 4.app" ]]; then has4=1; fi
-  if [[ $has3 -eq 0 && -d "/Applications/DEVONthink 3.app" ]]; then has3=1; fi
+  local has4=0 has3=0
+  [[ -d "$app4" || -d "$app4_user" ]] && has4=1
+  [[ -d "$app3" || -d "$app3_user" ]] && has3=1
 
   local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
   local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
@@ -352,9 +354,9 @@ install_files() {
   chmod +x "$bin_dst"
 
   if on_macos && [[ $INSTALL_DT -eq 1 ]]; then
-  	cleanup_other_dt_version_if_explicit
-  	install_dt_scripts_macos
-	fi
+    cleanup_other_dt_version_if_explicit
+    install_dt_scripts_macos
+  fi
 }
 
 uninstall_everything() {
