@@ -246,29 +246,68 @@ install_deps_linux() {
 
 # ---------- DEVONthink installation ----------
 
-# Detect DEVONthink by bundle IDs, then emit only the matching App Scripts base dir(s).
+# Detect DEVONthink by bundle IDs and/or by existing App Scripts dirs,
+# then emit only the matching App Scripts base dir(s).
 dt_target_dirs() {
   local want="${DT_MODE:-auto}"
 
-  local app4_sys="/Applications/DEVONthink 4.app"
-  local app4_usr="$HOME/Applications/DEVONthink 4.app"
-  local app3_sys="/Applications/DEVONthink 3.app"
-  local app3_usr="$HOME/Applications/DEVONthink 3.app"
+  # App candidates (DT4 can be "DEVONthink.app" or "DEVONthink 4.app")
+  local cands4=(
+    "/Applications/DEVONthink.app"
+    "/Applications/DEVONthink 4.app"
+    "$HOME/Applications/DEVONthink.app"
+    "$HOME/Applications/DEVONthink 4.app"
+  )
+  local cands3=(
+    "/Applications/DEVONthink 3.app"
+    "$HOME/Applications/DEVONthink 3.app"
+  )
 
-  # Helper: does this app path look like the right DT version?
+  # Helper: does this app path have one of the expected bundle IDs?
   _is_dt_app() {
-    local app="$1" expect_id="$2"
+    local app="$1"; shift
     [[ -d "$app" ]] || return 1
-    # Prefer mdls; fall back to reading Info.plist
-    local bid
+    local bid=""
     if command -v mdls >/dev/null 2>&1; then
       bid="$(mdls -name kMDItemCFBundleIdentifier -raw "$app" 2>/dev/null || true)"
     fi
     if [[ -z "${bid:-}" || "$bid" == "(null)" ]]; then
       bid="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null || true)"
     fi
-    [[ "$bid" == "$expect_id" ]]
+    for expect_id in "$@"; do
+      [[ "$bid" == "$expect_id" ]] && return 0
+    done
+    return 1
   }
+
+  local has4=0 has3=0
+  # Try app-bundle based detection
+  for p in "${cands4[@]}"; do
+    if _is_dt_app "$p" "com.devon-technologies.think" "com.devon-technologies.think4"; then
+      has4=1; break
+    fi
+  done
+  for p in "${cands3[@]}"; do
+    if _is_dt_app "$p" "com.devon-technologies.think3"; then
+      has3=1; break
+    fi
+  done
+
+  # Fallback: if app detection failed, consider script dirs that already exist
+  local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
+  local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
+  [[ $has4 -eq 1 || -d "$base4" ]] && has4=1
+  [[ $has3 -eq 1 || -d "$base3" ]] && has3=1
+
+  case "$want" in
+    4)  [[ $has4 -eq 1 ]] && printf '%s\n' "$base4" ;;
+    3)  [[ $has3 -eq 1 ]] && printf '%s\n' "$base3" ;;
+    auto|*)
+         [[ $has4 -eq 1 ]] && printf '%s\n' "$base4"
+         [[ $has3 -eq 1 ]] && printf '%s\n' "$base3"
+         ;;
+  esac
+}
 
   local has4=0 has3=0
   has4=0
