@@ -117,21 +117,42 @@ install_files() {
   chmod +x "$bin_dst"
 
   # Install DEVONthink scripts (compiled .scpt from repo)
-  local dt_menu="$HOME/Library/Application Scripts/com.devon-technologies.think/Menu"
-  local dt_rules="$HOME/Library/Application Scripts/com.devon-technologies.think/Smart Rules"
-  local dt3_menu="$HOME/Library/Application Scripts/com.devon-technologies.think3/Menu"
-  local dt3_rules="$HOME/Library/Application Scripts/com.devon-technologies.think3/Smart Rules"
-  mkdir -p "$dt_menu" "$dt_rules" "$dt3_menu" "$dt3_rules"
+  log "[get] Downloading and compiling DEVONthink scripts (.scpt)"
+  install_dt_scripts
+}
 
-  log "[get] Installing DEVONthink scripts (.scpt)"
-  download_to "$REPO_RAW/devonthink-scripts/compiled/Compress%20PDF%20Now.scpt" \
-              "$dt_menu/Compress PDF Now.scpt"
-  download_to "$REPO_RAW/devonthink-scripts/compiled/PDF%20Squeeze%20(Smart%20Rule).scpt" \
-              "$dt_rules/PDF Squeeze (Smart Rule).scpt"
+install_dt_scripts() {
+  echo "[get] Installing DEVONthink scripts (.scpt)"
 
-  # Also copy to DT3 if present (harmless if DT3 not installed)
-  cp -f "$dt_menu/Compress PDF Now.scpt" "$dt3_menu/Compress PDF Now.scpt" 2>/dev/null || true
-  cp -f "$dt_rules/PDF Squeeze (Smart Rule).scpt" "$dt3_rules/PDF Squeeze (Smart Rule).scpt" 2>/dev/null || true
+  # Where DEVONthink looks
+  local base="$HOME/Library/Application Scripts/com.devon-technologies.think"
+  local menu_dir="$base/Menu"
+  local rules_dir="$base/Smart Rules"
+  mkdir -p "$menu_dir" "$rules_dir"
+
+  # Raw URLs to source AppleScripts (note %20 for spaces)
+  local base_url="https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/devonthink-scripts/src"
+  local src_menu_url="$base_url/Compress%20PDF%20Now.applescript"
+  local src_rule_url="$base_url/PDF%20Squeeze%20(Smart%20Rule).applescript"
+
+  # Temp download locations
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  local src_menu="$tmp_dir/Compress PDF Now.applescript"
+  local src_rule="$tmp_dir/PDF Squeeze (Smart Rule).applescript"
+
+  # Fetch sources
+  curl -fsSL -o "$src_menu" "$src_menu_url" || { echo "[get] ERROR: 404 fetching Compress PDF Now.applescript"; return 1; }
+  curl -fsSL -o "$src_rule" "$src_rule_url" || { echo "[get] ERROR: 404 fetching PDF Squeeze (Smart Rule).applescript"; return 1; }
+
+  # Compile to .scpt where DEVONthink will load them
+  /usr/bin/osacompile -o "$menu_dir/Compress PDF Now.scpt"         "$src_menu" || { echo "[get] ERROR: osacompile menu script"; return 1; }
+  /usr/bin/osacompile -o "$rules_dir/PDF Squeeze (Smart Rule).scpt" "$src_rule" || { echo "[get] ERROR: osacompile smart rule"; return 1; }
+
+  rm -rf "$tmp_dir"
+  echo "[get] Installed:"
+  echo "  - $menu_dir/Compress PDF Now.scpt"
+  echo "  - $rules_dir/PDF Squeeze (Smart Rule).scpt"
 }
 
 ensure_mutool() {
