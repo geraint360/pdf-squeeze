@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# pdf-squeeze one-shot installer for macOS
-# - Installs Homebrew (if missing)
-# - Installs dependencies (ghostscript, pdfcpu, qpdf, mupdf-tools, exiftool, poppler, coreutils, parallel*)
-# - Installs pdf-squeeze to ~/bin (configurable via --prefix)
-# - Installs DEVONthink scripts (compiled .scpt) for DT4 and DT3 if present
-# - Supports: --no-parallel, --verify-only, --uninstall
-#
-# Usage:
-#   bash install-pdf-squeeze.sh [--no-parallel] [--prefix ~/bin] [--verify-only] [--uninstall]
-#
-# Repo: https://github.com/geraint360/pdf-squeeze
+# pdf-squeeze installer for macOS
+# - Installs Homebrew (if missing) and adds shellenv to ~/.zprofile
+# - Installs deps (ghostscript, pdfcpu, qpdf, exiftool, poppler, coreutils)
+# - Tries to provide mutool (mupdf-tools preferred). If mupdf is installed and
+#   conflicts, we WARN (optional dependency) instead of aborting.
+# - Optionally installs parallel (unless --no-parallel)
+# - Installs ~/bin/pdf-squeeze from GitHub (idempotent)
+# - Compiles & installs DEVONthink scripts (.scpt) from repo sources
+# - Flags: --no-parallel  --verify-only  --uninstall  --prefix PATH
 
 REPO_RAW="https://raw.githubusercontent.com/geraint360/pdf-squeeze/main"
 PREFIX_DEFAULT="$HOME/bin"
@@ -30,8 +28,8 @@ Usage: $0 [options]
 Options:
   --prefix PATH       Where to install pdf-squeeze (default: $PREFIX_DEFAULT)
   --no-parallel       Do not install GNU parallel
-  --verify-only       Check installation status without making changes
-  --uninstall         Remove installed files (does not remove Homebrew or brew packages)
+  --verify-only       Check installation status (exits non-zero if missing reqs)
+  --uninstall         Remove installed files (does not remove Homebrew or brew pkgs)
   -h, --help          Show this help
 EOF
 }
@@ -48,25 +46,21 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-on_macos() {
-  [[ "$(uname -s)" == "Darwin" ]]
-}
-
-ensure_macos() {
-  on_macos || die "This installer is for macOS."
-}
+on_macos() { [[ "$(uname -s)" == "Darwin" ]]; }
+ensure_macos() { on_macos || die "This installer is for macOS."; }
 
 brew_path=""
 have_brew() {
+  # Prefer explicit locations but fall back to PATH
   if [[ -x /opt/homebrew/bin/brew ]]; then brew_path=/opt/homebrew/bin/brew; return 0; fi
   if [[ -x /usr/local/bin/brew ]]; then brew_path=/usr/local/bin/brew; return 0; fi
+  if command -v brew >/dev/null 2>&1; then brew_path="$(command -v brew)"; return 0; fi
   return 1
 }
 
 eval_brew_shellenv() {
   if have_brew; then
-    # shellcheck disable=SC2046
-    eval "$($brew_path shellenv)"
+    eval "$("$brew_path" shellenv)"
   fi
 }
 
@@ -79,6 +73,15 @@ install_homebrew_if_needed() {
   NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   have_brew || die "Homebrew installation appears to have failed."
   eval_brew_shellenv
+
+  # Make sure future shells pick it up
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    grep -q 'brew shellenv' "$HOME/.zprofile" 2>/dev/null || \
+      { echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> "$HOME/.zprofile"; log "[brew] Added shellenv to ~/.zprofile"; }
+  elif [[ -x /usr/local/bin/brew ]]; then
+    grep -q 'brew shellenv' "$HOME/.zprofile" 2>/dev/null || \
+      { echo 'eval "$(/usr/local/bin/brew shellenv)"' >> "$HOME/.zprofile"; log "[brew] Added shellenv to ~/.zprofile"; }
+  fi
 }
 
 brew_install_if_missing() {
@@ -95,8 +98,9 @@ ensure_dirs() {
   mkdir -p "$INSTALL_PREFIX"
   # Ensure ~/bin is on PATH if using default
   if [[ "$INSTALL_PREFIX" == "$HOME/bin" ]]; then
-    if ! grep -q 'HOME/.*/bin' "${HOME}/.zprofile" 2>/dev/null && ! grep -q 'HOME/bin' "${HOME}/.zprofile" 2>/dev/null; then
-      echo 'export PATH="$HOME/bin:$PATH"' >> "${HOME}/.zprofile"
+    # Only add if not already present (anchored check)
+    if ! grep -qE '(^|:)\$?HOME/bin(:|$)' "$HOME/.zprofile" 2>/dev/null; then
+      echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.zprofile"
       log "[path] Added ~/bin to ~/.zprofile"
     fi
   fi
@@ -105,6 +109,70 @@ ensure_dirs() {
 download_to() {
   local url="$1" dst="$2"
   curl -fsSL "$url" -o "$dst"
+}
+
+install_dt_scripts() {
+  log "[get] Installing DEVONthink scripts (.scpt)"
+  local base="$HOME/Library/Application Scripts/com.devon-technologies.think"
+  local menu_dir="$base/Menu"
+  local rules_dir="$base/Smart Rules"
+  mkdir -p "$menu_dir" "$rules_dir"
+
+  local base_url="$REPO_RAW/devonthink-scripts/src"
+  local src_menu_url="$base_url/Compress%20PDF%20Now.applescript"
+  local src_rule_url="$base_url/PDF%20Squeeze%20(Smart%20Rule).applescript"
+
+  local tmp_dir; tmp_dir="$(mktemp -d)"
+  local src_menu="$tmp_dir/Compress PDF Now.applescript"
+  local src_rule="$tmp_dir/PDF Squeeze (Smart Rule).applescript"
+
+  curl -fsSL -o "$src_menu" "$src_menu_url" || { log "[get] ERROR: fetching Compress PDF Now.applescript"; rm -rf "$tmp_dir"; return 1; }
+  curl -fsSL -o "$src_rule" "$src_rule_url" || { log "[get] ERROR: fetching PDF Squeeze (Smart Rule).applescript"; rm -rf "$tmp_dir"; return 1; }
+
+  /usr/bin/osacompile -o "$menu_dir/Compress PDF Now.scpt"         "$src_menu" || { log "[get] ERROR: osacompile menu script"; rm -rf "$tmp_dir"; return 1; }
+  /usr/bin/osacompile -o "$rules_dir/PDF Squeeze (Smart Rule).scpt" "$src_rule" || { log "[get] ERROR: osacompile smart rule"; rm -rf "$tmp_dir"; return 1; }
+
+  rm -rf "$tmp_dir"
+  log "[get] Installed:"
+  log "  - $menu_dir/Compress PDF Now.scpt"
+  log "  - $rules_dir/PDF Squeeze (Smart Rule).scpt"
+}
+
+# mutool is helpful but not always necessary; avoid failing the whole run if it conflicts
+ensure_mutool_soft() {
+  if command -v mutool >/dev/null 2>&1; then
+    log "[deps] mutool OK ($(command -v mutool))"
+    return 0
+  fi
+
+  # If mupdf-tools is present, mutool should exist
+  if brew list --versions mupdf-tools >/dev/null 2>&1; then
+    brew link --overwrite mupdf-tools >/dev/null 2>&1 || true
+    if command -v mutool >/dev/null 2>&1; then
+      log "[deps] mutool OK via mupdf-tools"
+      return 0
+    fi
+  fi
+
+  # Try installing mupdf-tools if mupdf is NOT installed
+  if ! brew list --versions mupdf >/dev/null 2>&1; then
+    log "[deps] Installing mupdf-tools to provide mutool..."
+    if brew install mupdf-tools; then
+      if command -v mutool >/dev/null 2>&1; then
+        log "[deps] mutool OK via mupdf-tools"
+        return 0
+      fi
+    fi
+  fi
+
+  # If we’re here, either mupdf is installed and conflicts, or install failed.
+  if brew list --versions mupdf >/dev/null 2>&1; then
+    log "[deps] WARNING: 'mupdf' is installed. If 'mutool' is needed, run:"
+    log "        brew unlink mupdf && brew install mupdf-tools"
+  else
+    log "[deps] WARNING: 'mutool' not available (optional)."
+  fi
+  return 0
 }
 
 install_files() {
@@ -116,90 +184,62 @@ install_files() {
   download_to "$REPO_RAW/pdf-squeeze" "$bin_dst"
   chmod +x "$bin_dst"
 
-  # Install DEVONthink scripts (compiled .scpt from repo)
-  log "[get] Downloading and compiling DEVONthink scripts (.scpt)"
-  install_dt_scripts
-}
-
-install_dt_scripts() {
-  echo "[get] Installing DEVONthink scripts (.scpt)"
-
-  # Where DEVONthink looks
-  local base="$HOME/Library/Application Scripts/com.devon-technologies.think"
-  local menu_dir="$base/Menu"
-  local rules_dir="$base/Smart Rules"
-  mkdir -p "$menu_dir" "$rules_dir"
-
-  # Raw URLs to source AppleScripts (note %20 for spaces)
-  local base_url="https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/devonthink-scripts/src"
-  local src_menu_url="$base_url/Compress%20PDF%20Now.applescript"
-  local src_rule_url="$base_url/PDF%20Squeeze%20(Smart%20Rule).applescript"
-
-  # Temp download locations
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  local src_menu="$tmp_dir/Compress PDF Now.applescript"
-  local src_rule="$tmp_dir/PDF Squeeze (Smart Rule).applescript"
-
-  # Fetch sources
-  curl -fsSL -o "$src_menu" "$src_menu_url" || { echo "[get] ERROR: 404 fetching Compress PDF Now.applescript"; return 1; }
-  curl -fsSL -o "$src_rule" "$src_rule_url" || { echo "[get] ERROR: 404 fetching PDF Squeeze (Smart Rule).applescript"; return 1; }
-
-  # Compile to .scpt where DEVONthink will load them
-  /usr/bin/osacompile -o "$menu_dir/Compress PDF Now.scpt"         "$src_menu" || { echo "[get] ERROR: osacompile menu script"; return 1; }
-  /usr/bin/osacompile -o "$rules_dir/PDF Squeeze (Smart Rule).scpt" "$src_rule" || { echo "[get] ERROR: osacompile smart rule"; return 1; }
-
-  rm -rf "$tmp_dir"
-  echo "[get] Installed:"
-  echo "  - $menu_dir/Compress PDF Now.scpt"
-  echo "  - $rules_dir/PDF Squeeze (Smart Rule).scpt"
-}
-
-ensure_mutool() {
-  if command -v mutool >/dev/null 2>&1; then
-    echo "[deps] mutool OK ($(command -v mutool))"
-    return 0
-  fi
-
-  # Try to use existing mupdf, if installed
-  if brew list --versions mupdf >/dev/null 2>&1; then
-    echo "[deps] mupdf is installed; attempting to ensure mutool is linked..."
-    brew link mupdf >/dev/null 2>&1 || true
-    if command -v mutool >/dev/null 2>&1; then
-      echo "[deps] mutool OK via mupdf"
-      return 0
-    fi
-  fi
-
-  # Try to install mupdf-tools (preferred provider for mutool)
-  echo "[deps] installing mupdf-tools to provide mutool..."
-  if ! brew install mupdf-tools; then
-    echo "[deps] Note: Homebrew refused to install mupdf-tools because 'mupdf' is installed."
-    echo "[deps] You can either:"
-    echo "  - Keep 'mupdf' (skip installing mupdf-tools) if 'mutool' is available, OR"
-    echo "  - Replace it: brew unlink mupdf && brew install mupdf-tools"
-    return 1
-  fi
-
-  if command -v mutool >/dev/null 2>&1; then
-    echo "[deps] mutool OK via mupdf-tools"
-    return 0
-  fi
-
-  echo "[deps] ERROR: mutool still not found after attempting installation."
-  return 1
+  # Install DEVONthink scripts
+  install_dt_scripts || true
 }
 
 install_deps() {
   install_homebrew_if_needed
   eval_brew_shellenv
-  # Required deps
   local req=(ghostscript pdfcpu qpdf exiftool poppler coreutils)
   for p in "${req[@]}"; do brew_install_if_missing "$p"; done
-  # Ensure a mutool provider is present:
-  ensure_mutool
-  # Optional
+  ensure_mutool_soft
   if [[ $INSTALL_PARALLEL -eq 1 ]]; then brew_install_if_missing parallel; fi
+}
+
+verify_report() {
+  local missing=0
+  echo "=== pdf-squeeze installation report ==="
+  echo "macOS: $(sw_vers -productVersion 2>/dev/null || echo unknown)"
+  echo "Homebrew: $(brew --version 2>/dev/null | head -n1 || echo 'missing')"
+  printf "pdf-squeeze: "
+  if command -v pdf-squeeze >/dev/null 2>&1; then
+    echo "$(command -v pdf-squeeze)"
+  else
+    echo "not on PATH"; missing=1
+  fi
+  for tool in pdfcpu gs qpdf exiftool pdftotext gstat; do
+    printf "%s: " "$tool"
+    if command -v "$tool" >/dev/null 2>&1; then
+      echo "$(command -v "$tool")"
+    else
+      echo "missing"; [[ "$tool" =~ ^(pdfcpu|gs|qpdf|pdftotext|gstat)$ ]] && missing=1
+    fi
+  done
+  # Optional tools
+  printf "mutool: "; command -v mutool >/dev/null 2>&1 && echo "$(command -v mutool)" || echo "missing (optional)"
+  printf "parallel: "; command -v parallel >/dev/null 2>&1 && echo "$(command -v parallel)" || echo "missing (optional)"
+
+  echo
+  echo "DEVONthink scripts:"
+  for f in \
+    "$HOME/Library/Application Scripts/com.devon-technologies.think/Menu/Compress PDF Now.scpt" \
+    "$HOME/Library/Application Scripts/com.devon-technologies.think/Smart Rules/PDF Squeeze (Smart Rule).scpt" \
+    "$HOME/Library/Application Scripts/com.devon-technologies.think3/Menu/Compress PDF Now.scpt" \
+    "$HOME/Library/Application Scripts/com.devon-technologies.think3/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+  do
+    if [[ -f "$f" ]]; then echo "  OK  $f"; else echo "  MISSING  $f"; fi
+  done
+
+  echo
+  echo "PREFIX: $INSTALL_PREFIX"
+  if [[ ":$PATH:" == *":$INSTALL_PREFIX:"* ]]; then
+    echo "PATH includes $INSTALL_PREFIX"
+  else
+    echo "PATH does NOT include $INSTALL_PREFIX (add to ~/.zprofile)"
+  fi
+
+  return $missing
 }
 
 uninstall_everything() {
@@ -223,38 +263,6 @@ uninstall_everything() {
   fi
 }
 
-verify_report() {
-  echo "=== pdf-squeeze installation report ==="
-  echo "macOS: $(sw_vers -productVersion 2>/dev/null || echo unknown)"
-  echo "Homebrew: $(brew --version 2>/dev/null | head -n1 || echo 'missing')"
-  echo "pdf-squeeze: $(command -v pdf-squeeze || echo 'not on PATH')"
-  echo "pdfcpu: $(command -v pdfcpu || echo 'missing')"
-  echo "ghostscript(gs): $(command -v gs || echo 'missing')"
-  echo "qpdf: $(command -v qpdf || echo 'missing')"
-  echo "mutool: $(command -v mutool || echo 'missing')"
-  echo "exiftool: $(command -v exiftool || echo 'missing')"
-  echo "pdftotext: $(command -v pdftotext || echo 'missing')"
-  echo "gstat: $(command -v gstat || echo 'missing (from coreutils)')"
-  echo "parallel: $(command -v parallel || echo 'missing (optional)')"
-  echo
-  echo "DEVONthink scripts:"
-  for f in \
-    "$HOME/Library/Application Scripts/com.devon-technologies.think/Menu/Compress PDF Now.scpt" \
-    "$HOME/Library/Application Scripts/com.devon-technologies.think/Smart Rules/PDF Squeeze (Smart Rule).scpt" \
-    "$HOME/Library/Application Scripts/com.devon-technologies.think3/Menu/Compress PDF Now.scpt" \
-    "$HOME/Library/Application Scripts/com.devon-technologies.think3/Smart Rules/PDF Squeeze (Smart Rule).scpt"
-  do
-    if [[ -f "$f" ]]; then echo "  OK  $f"; else echo "  MISSING  $f"; fi
-  done
-  echo
-  echo "PREFIX: $INSTALL_PREFIX"
-  if [[ ":$PATH:" == *":$INSTALL_PREFIX:"* ]]; then
-    echo "PATH includes $INSTALL_PREFIX"
-  else
-    echo "PATH does NOT include $INSTALL_PREFIX (add to ~/.zprofile)"
-  fi
-}
-
 main() {
   ensure_macos
 
@@ -264,7 +272,7 @@ main() {
   fi
 
   if [[ $VERIFY_ONLY -eq 1 ]]; then
-    verify_report
+    verify_report || exit 1
     exit 0
   fi
 
@@ -275,8 +283,11 @@ main() {
   install_files
 
   log "[install] Verifying..."
-  verify_report
-  log "[install] Complete."
+  if verify_report; then
+    log "[install] Complete."
+  else
+    die "Verification failed (see report above)."
+  fi
 }
 
 main "$@"
