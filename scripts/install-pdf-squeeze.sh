@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) shift; INSTALL_PREFIX="${1:-}"; [[ -n "${INSTALL_PREFIX}" ]] || die "--prefix needs a path";;
     --with-devonthink) INSTALL_DT=1;;
-		--dt) shift; DT_MODE="${1:-auto}"; [[ "$DT_MODE" =~ ^(auto|3|4)$ ]] || die "--dt must be auto|3|4";;
+		--dt) shift; DT_MODE="${1:-auto}"; case "$DT_MODE" in auto|3|4) ;; *) die "--dt must be auto|3|4";; esac ;;
     --no-parallel) INSTALL_PARALLEL=0;;
     --verify-only) VERIFY_ONLY=1;;
     --uninstall) UNINSTALL=1;;
@@ -272,24 +272,6 @@ dt_target_dirs() {
       ;;
   esac
 }
-# Return a list of base script dirs we should install to, based on DT_MODE and what is installed
-# Usage: mapfile -t bases < <(dt_target_dirs)
-dt_target_dirs() {
-  detect_dt_apps
-  case "$DT_MODE" in
-    4)
-      [[ $DT4_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think"
-      ;;
-    3)
-      [[ $DT3_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think3"
-      ;;
-    auto)
-      # If both are installed, install to both; otherwise whichever exists.
-      [[ $DT4_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think"
-      [[ $DT3_PRESENT -eq 1 ]] && echo "$HOME/Library/Application Scripts/com.devon-technologies.think3"
-      ;;
-  esac
-}
 install_dt_scripts_macos() {
   local base_url="$REPO_RAW/devonthink-scripts/src"
   local src_menu_url="$base_url/Compress%20PDF%20Now.applescript"
@@ -394,7 +376,7 @@ verify_report() {
   echo "gstat: $(command -v gstat || echo 'missing (from coreutils)')"
   echo "parallel: $(command -v parallel || echo 'missing (optional)')"
   echo
-	if on_macos; then
+  if on_macos; then
     echo "DEVONthink scripts (mode=$DT_MODE):"
     local any=0
     while IFS= read -r base; do
