@@ -134,12 +134,49 @@ install_files() {
   cp -f "$dt_rules/PDF Squeeze (Smart Rule).scpt" "$dt3_rules/PDF Squeeze (Smart Rule).scpt" 2>/dev/null || true
 }
 
+ensure_mutool() {
+  if command -v mutool >/dev/null 2>&1; then
+    echo "[deps] mutool OK ($(command -v mutool))"
+    return 0
+  fi
+
+  # Try to use existing mupdf, if installed
+  if brew list --versions mupdf >/dev/null 2>&1; then
+    echo "[deps] mupdf is installed; attempting to ensure mutool is linked..."
+    brew link mupdf >/dev/null 2>&1 || true
+    if command -v mutool >/dev/null 2>&1; then
+      echo "[deps] mutool OK via mupdf"
+      return 0
+    fi
+  fi
+
+  # Try to install mupdf-tools (preferred provider for mutool)
+  echo "[deps] installing mupdf-tools to provide mutool..."
+  if ! brew install mupdf-tools; then
+    echo "[deps] Note: Homebrew refused to install mupdf-tools because 'mupdf' is installed."
+    echo "[deps] You can either:"
+    echo "  - Keep 'mupdf' (skip installing mupdf-tools) if 'mutool' is available, OR"
+    echo "  - Replace it: brew unlink mupdf && brew install mupdf-tools"
+    return 1
+  fi
+
+  if command -v mutool >/dev/null 2>&1; then
+    echo "[deps] mutool OK via mupdf-tools"
+    return 0
+  fi
+
+  echo "[deps] ERROR: mutool still not found after attempting installation."
+  return 1
+}
+
 install_deps() {
   install_homebrew_if_needed
   eval_brew_shellenv
   # Required deps
-  local req=(ghostscript pdfcpu qpdf mupdf-tools exiftool poppler coreutils)
+  local req=(ghostscript pdfcpu qpdf exiftool poppler coreutils)
   for p in "${req[@]}"; do brew_install_if_missing "$p"; done
+  # Ensure a mutool provider is present:
+  ensure_mutool
   # Optional
   if [[ $INSTALL_PARALLEL -eq 1 ]]; then brew_install_if_missing parallel; fi
 }
