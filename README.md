@@ -1,6 +1,6 @@
 # pdf-squeeze
 
-A fast, pragmatic PDF size reducer for **macOS and Linux**. `pdf-squeeze` targets **meaningful size savings** while keeping documents **readable, searchable, and printable**. It ships as a **single zsh script** with sensible defaults, guard-rails, and excellent batch support.
+A fast PDF size reducer for macOS and Linux. Targets **material** file-size savings while keeping documents readable and searchable. Ships as a single script (`pdf-squeeze`, **zsh**) with pragmatic defaults, safety rails, and first-class batch support.
 
 > Typical savings on mixed documents are **20–70%**, depending on content and preset. See **Presets** and **Examples** below.
 
@@ -67,6 +67,8 @@ curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts
 
 This will download, compile and install the  Applescripts into the correct ~/Library/Application Scripts/... folders for DEVONthink 4 (and DEVONthink 3 if detected).
 
+You can target a specific version (and avoid “missing” notices) with `--dt 4` or `--dt 3` (default `auto`).
+
 ---
 
 ### Uninstallation
@@ -77,6 +79,10 @@ Copy and paste this into a Terminal window:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts/install-pdf-squeeze.sh | bash -s -- --uninstall
+```
+Verify current setup (paths and tools):
+```bash
+curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/scripts/install-pdf-squeeze.sh | bash -s -- --verify-only
 ```
 
 ---
@@ -369,10 +375,11 @@ Smart Rules can safely run `--inplace mode`; timestamps are preserved unless ove
 
 ### Installation
 
-The **quick installer** automatically installs the AppleScripts into the correct **DEVONthink 4** directories: 
+Use the installer to place the compiled scripts into the correct **DEVONthink 4**/**3** folders. By default, it auto-detects what you have installed:
 
 ```bash 
-(curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/install-pdf-squeeze.sh)
+(curl -fsSL https://raw.githubusercontent.com/geraint360/pdf-squeeze/main/install-pdf-squeeze.sh \)
+ | bash -s -- --with-devonthink
 ```
 >Tip: Re-running the installer will **update** the scripts to the latest version automatically.
 

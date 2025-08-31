@@ -243,22 +243,35 @@ install_deps_linux() {
 
 # ---------- DEVONthink installation ----------
 
-# Detect installed DEVONthink apps (sets DT3_PRESENT/DT4_PRESENT=1 if found)
-detect_dt_apps() {
-  DT3_PRESENT=0; DT4_PRESENT=0
-  # Common locations
-  local cands4=(
-    "/Applications/DEVONthink 4.app"
-    "$HOME/Applications/DEVONthink 4.app"
-  )
-  local cands3=(
-    "/Applications/DEVONthink 3.app"
-    "$HOME/Applications/DEVONthink 3.app"
-  )
-  for p in "${cands4[@]}"; do [[ -d "$p" ]] && { DT4_PRESENT=1; break; }; done
-  for p in "${cands3[@]}"; do [[ -d "$p" ]] && { DT3_PRESENT=1; break; }; done
-}
+# Echo the DEVONthink "Application Scripts" base dir(s) to target, one per line.
+# Honors DT_MODE (auto|3|4). In auto mode, detect installed apps; if none found,
+# default to both locations so the user can copy later if desired.
+dt_target_dirs() {
+  local want="$DT_MODE"
+  local d4="/Applications/DEVONthink 4.app"
+  local d3="/Applications/DEVONthink 3.app"
+  local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
+  local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
 
+  case "$want" in
+    4)
+      [[ -d "$d4" ]] && printf '%s\n' "$base4"
+      ;;
+    3)
+      [[ -d "$d3" ]] && printf '%s\n' "$base3"
+      ;;
+    auto|*)
+      local any=0
+      if [[ -d "$d4" ]]; then printf '%s\n' "$base4"; any=1; fi
+      if [[ -d "$d3" ]]; then printf '%s\n' "$base3"; any=1; fi
+      # If neither app bundle is present, fall back to both so we don’t block installs.
+      if [[ $any -eq 0 ]]; then
+        printf '%s\n' "$base4"
+        printf '%s\n' "$base3"
+      fi
+      ;;
+  esac
+}
 # Return a list of base script dirs we should install to, based on DT_MODE and what is installed
 # Usage: mapfile -t bases < <(dt_target_dirs)
 dt_target_dirs() {
@@ -278,12 +291,6 @@ dt_target_dirs() {
   esac
 }
 install_dt_scripts_macos() {
-  mapfile -t bases < <(dt_target_dirs)
-  if [[ ${#bases[@]} -eq 0 ]]; then
-    log "[get] DEVONthink not found (mode=$DT_MODE); skipping AppleScript install."
-    return 0
-  fi
-
   local base_url="$REPO_RAW/devonthink-scripts/src"
   local src_menu_url="$base_url/Compress%20PDF%20Now.applescript"
   local src_rule_url="$base_url/PDF%20Squeeze%20(Smart%20Rule).applescript"
@@ -297,20 +304,28 @@ install_dt_scripts_macos() {
   curl -fsSL -o "$src_menu" "$src_menu_url"
   curl -fsSL -o "$src_rule" "$src_rule_url"
 
-  for base in "${bases[@]}"; do
+  local had=0
+  while IFS= read -r base; do
+    [[ -n "$base" ]] || continue
+    had=1
     local menu_dir="$base/Menu"
     local rules_dir="$base/Smart Rules"
     mkdir -p "$menu_dir" "$rules_dir"
 
-    /usr/bin/osacompile -o "$menu_dir/Compress PDF Now.scpt"         "$src_menu"
-    /usr/bin/osacompile -o "$rules_dir/PDF Squeeze (Smart Rule).scpt" "$src_rule"
+    /usr/bin/osacompile -o "$menu_dir/Compress PDF Now.scpt"         "$src_menu" \
+      || { log "[get] ERROR: osacompile menu"; rm -rf "$tmp_dir"; return 1; }
+    /usr/bin/osacompile -o "$rules_dir/PDF Squeeze (Smart Rule).scpt" "$src_rule" \
+      || { log "[get] ERROR: osacompile smart rule"; rm -rf "$tmp_dir"; return 1; }
 
     log "[get] Installed DT scripts to:"
     log "  - $menu_dir/Compress PDF Now.scpt"
     log "  - $rules_dir/PDF Squeeze (Smart Rule).scpt"
-  done
+  done < <(dt_target_dirs)
 
   rm -rf "$tmp_dir"
+  if [[ $had -eq 0 ]]; then
+    log "[get] DEVONthink not found (mode=$DT_MODE); skipped AppleScript install."
+  fi
 }
 
 # ---------- Main Installer ----------
@@ -347,19 +362,16 @@ uninstall_everything() {
   local bin_dst="$INSTALL_PREFIX/pdf-squeeze"
   if [[ -f "$bin_dst" ]]; then rm -f "$bin_dst"; log "[rm] $bin_dst"; removed=1; fi
 
-	if on_macos; then
-    mapfile -t bases < <(dt_target_dirs)
-    if [[ ${#bases[@]} -eq 0 ]]; then
-      log "[uninstall] No matching DEVONthink installation detected (mode=$DT_MODE)."
-    else
-      for base in "${bases[@]}"; do
-        local dt_menu="$base/Menu/Compress PDF Now.scpt"
-        local dt_rules="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
-        for f in "$dt_menu" "$dt_rules"; do
-          if [[ -f "$f" ]]; then rm -f "$f"; log "[rm] $f"; removed=1; fi
-        done
-      done
-    fi
+  if on_macos; then
+    local removed_dt=0
+    while IFS= read -r base; do
+      [[ -n "$base" ]] || continue
+      local dt_menu="$base/Menu/Compress PDF Now.scpt"
+      local dt_rules="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+      if [[ -f "$dt_menu" ]];  then rm -f "$dt_menu";  log "[rm] $dt_menu";  removed=1; removed_dt=1; fi
+      if [[ -f "$dt_rules" ]]; then rm -f "$dt_rules"; log "[rm] $dt_rules"; removed=1; removed_dt=1; fi
+    done < <(dt_target_dirs)
+    [[ $removed_dt -eq 0 ]] && log "[uninstall] No matching DEVONthink paths (mode=$DT_MODE)."
   fi
 
   if [[ $removed -eq 0 ]]; then
@@ -382,20 +394,18 @@ verify_report() {
   echo "gstat: $(command -v gstat || echo 'missing (from coreutils)')"
   echo "parallel: $(command -v parallel || echo 'missing (optional)')"
   echo
-    if on_macos; then
+	if on_macos; then
     echo "DEVONthink scripts (mode=$DT_MODE):"
-    detect_dt_apps
-    mapfile -t bases < <(dt_target_dirs)
-    if [[ ${#bases[@]} -eq 0 ]]; then
-      echo "  (no matching DEVONthink installation detected; nothing expected)"
-    else
-      for base in "${bases[@]}"; do
-        menu="$base/Menu/Compress PDF Now.scpt"
-        rule="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
-        [[ -f "$menu" ]] && echo "  OK  $menu" || echo "  MISSING  $menu"
-        [[ -f "$rule" ]] && echo "  OK  $rule" || echo "  MISSING  $rule"
-      done
-    fi
+    local any=0
+    while IFS= read -r base; do
+      [[ -n "$base" ]] || continue
+      any=1
+      local menu="$base/Menu/Compress PDF Now.scpt"
+      local rule="$base/Smart Rules/PDF Squeeze (Smart Rule).scpt"
+      [[ -f "$menu" ]] && echo "  OK      $menu" || echo "  MISSING $menu"
+      [[ -f "$rule" ]] && echo "  OK      $rule" || echo "  MISSING $rule"
+    done < <(dt_target_dirs)
+    [[ $any -eq 0 ]] && echo "  (no matching DEVONthink installation detected; nothing expected)"
   else
     echo "DEVONthink: (not applicable on Linux)"
   fi
