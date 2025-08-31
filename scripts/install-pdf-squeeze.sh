@@ -246,14 +246,7 @@ install_deps_linux() {
 
 # ---------- DEVONthink installation ----------
 
-# Echo the DEVONthink "Application Scripts" base dir(s) to target, one per line.
-# Honors DT_MODE (auto|3|4). In auto mode, detect installed apps; if none found,
-# default to both locations so the user can copy later if desired.
 # Detect DEVONthink by bundle IDs, then emit only the matching App Scripts base dir(s).
-# Return DT "Application Scripts" dir(s) for actually installed versions only.
-# Honors DT_MODE=auto|3|4.
-# Return DT "Application Scripts" dir(s) for actually installed versions only.
-# Honors DT_MODE=auto|3|4. Uses bundle IDs for robustness.
 dt_target_dirs() {
   local want="${DT_MODE:-auto}"
 
@@ -278,9 +271,17 @@ dt_target_dirs() {
   }
 
   local has4=0 has3=0
-  _is_dt_app "$app4_sys" "com.devon-technologies.think4" || _is_dt_app "$app4_usr" "com.devon-technologies.think4" && has4=1
-  _is_dt_app "$app3_sys" "com.devon-technologies.think3" || _is_dt_app "$app3_usr" "com.devon-technologies.think3" && has3=1
-
+  has4=0
+	if _is_dt_app "$app4_sys" "com.devon-technologies.think4" || \
+		 _is_dt_app "$app4_usr" "com.devon-technologies.think4"; then
+		has4=1
+	fi
+	
+	has3=0
+	if _is_dt_app "$app3_sys" "com.devon-technologies.think3" || \
+		 _is_dt_app "$app3_usr" "com.devon-technologies.think3"; then
+		has3=1
+	fi
   local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
   local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
 
