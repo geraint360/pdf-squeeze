@@ -391,8 +391,7 @@ Use the `--prefix` option if you need to override defaults.
 ### Using the Scripts in DEVONthink
 
 **Compress PDF Now**
-- Open **Preferences → Scripts** and ensure the scripts folder is enabled.
-- Add the script to the **Toolbar** via _View → Customize Toolbar_ or run it from the **Scripts** menu.
+- Select a PDF then run the script from the **Scripts** menu.
 
 **PDF Squeeze (Smart Rule)**
 - Create a **Smart Rule** (_Tools → New Smart Rule…_)
@@ -450,7 +449,7 @@ Use the `--prefix` option if you need to override defaults.
   ~/Library/Application Scripts/com.devon-technologies.think/Menu
   ~/Library/Application Scripts/com.devon-technologies.think/Smart Rules
   ```
-  Then restart DEVONthink. (Updates to the Smart Rule won't take effect without restarting DEVONthink.)
+  Then restart DEVONthink. (Updates to the Smart Rule don't appear to take effect without restarting DEVONthink.)
 
 ---
 
@@ -461,7 +460,7 @@ This is only relevant to those who want to reuse or extend pdf-squeeze.
 ## Build and Install
 
 ```bash
-make install-bin          # installs ./pdf-squeeze → ~/bin/pdf-squeeze (default)
+make install-bin          # installs ./pdf-squeeze to ~/bin/pdf-squeeze (default)
 ```
 Ensure `~/bin` is on your `PATH`. Override the target with:
 ```bash
@@ -473,7 +472,7 @@ make install-bin PREFIX=/some/other/bin
 If you want the accompanying DEVONthink automations:
 
 ```bash
-make compile              # compiles .applescript → .scpt under devonthink-scripts/compiled
+make compile              # compiles .applescript to .scpt in devonthink-scripts/compiled
 make install-dt           # installs compiled .scpt into DEVONthink’s “App Scripts” folder
 # Or both:
 make install              # = install-bin + install-dt
