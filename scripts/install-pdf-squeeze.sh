@@ -146,7 +146,7 @@ linux_install_pkgs() {
       sudo dnf install -y "${pkgs[@]}"
       ;;
     pacman)
-      sudo pacman -Sy --noconfirm "${pkgs[@]}"
+      sudo pacman -Sy --noconfirm --needed "${pkgs[@]}"
       ;;
     zypper)
       sudo zypper refresh
@@ -181,11 +181,11 @@ install_pdfcpu_linux_if_missing() {
   mkdir -p "$dir"
 
   # Try candidates
-  urls=(
-    "https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_linux_${arch}.tar.xz"
-    "https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_Linux_${arch}.tar.xz"
-    "https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_Linux_$( [[ $arch == amd64 ]] && echo x86_64 || echo ${arch} ).tar.xz"
-  )
+  local -a urls=(
+		"https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_linux_${arch}.tar.xz"
+		"https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_Linux_${arch}.tar.xz"
+		"https://github.com/pdfcpu/pdfcpu/releases/download/v${PDFCPU_VERSION}/pdfcpu_${PDFCPU_VERSION}_Linux_$( [[ $arch == amd64 ]] && echo x86_64 || echo ${arch} ).tar.xz"
+	)
   local ok=0
   for url in "${urls[@]}"; do
     log "[deps] Trying $url"
@@ -194,18 +194,19 @@ install_pdfcpu_linux_if_missing() {
   [[ $ok -eq 1 ]] || die "Failed to download pdfcpu tarball"
 
   tar -xJf "$tmp/pdfcpu.tar.xz" -C "$dir"
-  if [[ -f "$dir/pdfcpu" ]]; then
-    if [[ -w /usr/local/bin ]]; then
-      sudo install -m 0755 "$dir/pdfcpu" /usr/local/bin/pdfcpu
-      log "[deps] pdfcpu -> /usr/local/bin/pdfcpu"
-    else
-      mkdir -p "$HOME/bin"
-      install -m 0755 "$dir/pdfcpu" "$HOME/bin/pdfcpu"
-      log "[deps] pdfcpu -> $HOME/bin/pdfcpu (add \$HOME/bin to PATH if needed)"
-    fi
-  else
-    die "pdfcpu binary not found in downloaded archive"
-  fi
+  # Find the binary anywhere in the extracted tree
+	local bin
+	bin="$(find "$dir" -type f -name pdfcpu -perm -111 | head -n1 || true)"
+	[[ -n "$bin" ]] || die "pdfcpu binary not found in downloaded archive"
+	
+	if [[ -w /usr/local/bin ]]; then
+		sudo install -m 0755 "$bin" /usr/local/bin/pdfcpu
+		log "[deps] pdfcpu -> /usr/local/bin/pdfcpu"
+	else
+		mkdir -p "$HOME/bin"
+		install -m 0755 "$bin" "$HOME/bin/pdfcpu"
+		log "[deps] pdfcpu -> $HOME/bin/pdfcpu (add \$HOME/bin to PATH if needed)"
+	fi
   rm -rf "$tmp"
 }
 install_deps_linux() {
@@ -246,12 +247,15 @@ install_deps_linux() {
 
 # ---------- DEVONthink installation ----------
 
-# Detect DEVONthink by bundle IDs and/or by existing App Scripts dirs,
-# then emit only the matching App Scripts base dir(s).
+# Detect DEVONthink by app presence, optionally confirm via bundle ID,
+# and fall back to existing App Scripts dirs. Emits only relevant bases.
 dt_target_dirs() {
   local want="${DT_MODE:-auto}"
 
-  # App candidates (DT4 can be "DEVONthink.app" or "DEVONthink 4.app")
+  local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
+  local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
+
+  # DT4 can be "DEVONthink.app" or "DEVONthink 4.app"
   local cands4=(
     "/Applications/DEVONthink.app"
     "/Applications/DEVONthink 4.app"
@@ -263,41 +267,14 @@ dt_target_dirs() {
     "$HOME/Applications/DEVONthink 3.app"
   )
 
-  # Helper: does this app path have one of the expected bundle IDs?
-  _is_dt_app() {
-    local app="$1"; shift
-    [[ -d "$app" ]] || return 1
-    local bid=""
-    if command -v mdls >/dev/null 2>&1; then
-      bid="$(mdls -name kMDItemCFBundleIdentifier -raw "$app" 2>/dev/null || true)"
-    fi
-    if [[ -z "${bid:-}" || "$bid" == "(null)" ]]; then
-      bid="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null || true)"
-    fi
-    for expect_id in "$@"; do
-      [[ "$bid" == "$expect_id" ]] && return 0
-    done
-    return 1
-  }
-
   local has4=0 has3=0
-  # Try app-bundle based detection
-  for p in "${cands4[@]}"; do
-    if _is_dt_app "$p" "com.devon-technologies.think" "com.devon-technologies.think4"; then
-      has4=1; break
-    fi
-  done
-  for p in "${cands3[@]}"; do
-    if _is_dt_app "$p" "com.devon-technologies.think3"; then
-      has3=1; break
-    fi
-  done
+  # App presence is primary
+  for p in "${cands4[@]}"; do [[ -d "$p" ]] && { has4=1; break; }; done
+  for p in "${cands3[@]}"; do [[ -d "$p" ]] && { has3=1; break; }; done
 
-  # Fallback: if app detection failed, consider script dirs that already exist
-  local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
-  local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
-  [[ $has4 -eq 1 || -d "$base4" ]] && has4=1
-  [[ $has3 -eq 1 || -d "$base3" ]] && has3=1
+  # If apps weren’t found, but script dirs already exist, still target them
+  [[ -d "$base4" ]] && has4=1
+  [[ -d "$base3" ]] && has3=1
 
   case "$want" in
     4)  [[ $has4 -eq 1 ]] && printf '%s\n' "$base4" ;;
@@ -309,30 +286,6 @@ dt_target_dirs() {
   esac
 }
 
-  local has4=0 has3=0
-  has4=0
-	if _is_dt_app "$app4_sys" "com.devon-technologies.think4" || \
-		 _is_dt_app "$app4_usr" "com.devon-technologies.think4"; then
-		has4=1
-	fi
-	
-	has3=0
-	if _is_dt_app "$app3_sys" "com.devon-technologies.think3" || \
-		 _is_dt_app "$app3_usr" "com.devon-technologies.think3"; then
-		has3=1
-	fi
-  local base4="$HOME/Library/Application Scripts/com.devon-technologies.think"
-  local base3="$HOME/Library/Application Scripts/com.devon-technologies.think3"
-
-  case "$want" in
-    4)  [[ $has4 -eq 1 ]] && printf '%s\n' "$base4" ;;
-    3)  [[ $has3 -eq 1 ]] && printf '%s\n' "$base3" ;;
-    auto|*)
-         [[ $has4 -eq 1 ]] && printf '%s\n' "$base4"
-         [[ $has3 -eq 1 ]] && printf '%s\n' "$base3"
-         ;;
-  esac
-}
 # If DT_MODE explicitly selects 3 or 4, remove scripts from the other version
 cleanup_other_dt_version_if_explicit() {
   case "${DT_MODE:-auto}" in
@@ -391,11 +344,12 @@ install_dt_scripts_macos() {
 ensure_dirs() {
   mkdir -p "$INSTALL_PREFIX"
   if [[ "$INSTALL_PREFIX" == "$HOME/bin" ]]; then
-    if ! grep -q 'HOME/bin' "${HOME}/.zprofile" 2>/dev/null; then
-      echo 'export PATH="$HOME/bin:$PATH"' >> "${HOME}/.zprofile"
-      log "[path] Added ~/bin to ~/.zprofile"
-    fi
-  fi
+		local export_line='export PATH="$HOME/bin:$PATH"'
+		grep -q 'HOME/bin' "$HOME/.zprofile" 2>/dev/null || { echo "$export_line" >> "$HOME/.zprofile"; log "[path] Added ~/bin to ~/.zprofile"; }
+		if [[ "${SHELL##*/}" == "bash" || -f "$HOME/.bash_profile" ]]; then
+			grep -q 'HOME/bin' "$HOME/.bash_profile" 2>/dev/null || { echo "$export_line" >> "$HOME/.bash_profile"; log "[path] Added ~/bin to ~/.bash_profile"; }
+		fi
+	fi
 }
 
 download_to() {
@@ -450,7 +404,16 @@ verify_report() {
   echo "mutool: $(command -v mutool || echo 'missing')"
   echo "exiftool: $(command -v exiftool || echo 'missing')"
   echo "pdftotext: $(command -v pdftotext || echo 'missing')"
-  echo "gstat: $(command -v gstat || echo 'missing (from coreutils)')"
+  if on_macos; then
+		echo "gstat: $(command -v gstat || echo 'missing (from coreutils)')"
+	else
+		# On Linux, plain `stat` is GNU coreutils on most distros
+		if stat --version >/dev/null 2>&1; then
+			echo "stat: $(command -v stat)"
+		else
+			echo "stat: missing"
+		fi
+	fi
   echo "parallel: $(command -v parallel || echo 'missing (optional)')"
   echo
 	if on_macos; then
