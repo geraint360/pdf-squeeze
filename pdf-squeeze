@@ -79,7 +79,7 @@ PASSWORD=""; PASSWORD_FILE=""; POST_HOOK=""; SIDECAR=false
 QUIET=${QUIET:-false}; INTERNAL_ONE=false
 CHECK_DEPS=false
 
-log() { $QUIET || printf '%s\n' "$*"; }
+log() { $QUIET || printf '%s\n' "$@"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
